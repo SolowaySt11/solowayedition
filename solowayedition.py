@@ -35,67 +35,47 @@ def init_db():
 
 init_db()
 
-# --- Вспомогательные функции ---
+# --- Курс HKD -> RUB ---
 def get_exchange_rate():
-    """Курс HKD к RUB через ExchangeRate-API"""
     try:
         r = requests.get("https://api.exchangerate-api.com/v4/latest/HKD", timeout=10)
         data = r.json()
         return data['rates']['RUB']
     except:
-        return 12.0  # fallback курс, если API недоступен
+        return 12.0
 
-import json
-import re
-
+# --- Парсинг James Edition ---
 def fetch_property_data(url):
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Referer": "https://www.jamesedition.com/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # 1. Название — берём из <title> или og:title
+        # Название
         title = soup.find("meta", property="og:title")
-        title = title["content"].strip() if title else None
-        if not title:
-            title_tag = soup.find("title")
-            title = title_tag.text.strip() if title_tag else "Без названия"
+        title = title["content"].strip() if title else "Без названия"
 
-        # 2. Цена — сначала из JSON-LD, потом из og:price:amount
+        # Цена (HKD)
         price_hkd = None
-        # JSON-LD
-        for script in soup.find_all("script", type="application/ld+json"):
-            try:
-                data = json.loads(script.string)
-                if data.get("@type") == "Product" and data.get("offers"):
-                    price_hkd = float(data["offers"]["price"])
-                    break
-            except:
-                pass
+        meta_price = soup.find("meta", property="og:price:amount")
+        if meta_price and meta_price.get("content"):
+            price_hkd = float(meta_price["content"])
         if not price_hkd:
-            meta_price = soup.find("meta", property="og:price:amount")
-            if meta_price and meta_price.get("content"):
-                price_hkd = float(meta_price["content"])
-        if not price_hkd:
-            price_text = soup.find("div", class_="price")
-            if price_text:
-                match = re.search(r"[\d,]+\.?\d*", price_text.text)
+            price_span = soup.find("span", class_="price")
+            if price_span:
+                match = re.search(r"[\d,]+\.?\d*", price_span.text)
                 if match:
                     price_hkd = float(match.group().replace(",", ""))
 
-        # 3. Конвертация в рубли
+        # Конвертация в рубли
         rate = get_exchange_rate()
         price_rub = round(price_hkd * rate, 2) if price_hkd else None
 
-        # 4. Город и страна — из URL (надёжнее)
+        # Город и страна из URL
         country_match = re.search(r"/real_estate/[^/]+-([a-z-]+(?:-usa)?)/", url)
         country = country_match.group(1).replace("-", " ").title() if country_match else "Неизвестно"
-        # Убираем лишнее "New Zealand" -> "New Zealand"
         if "new zealand" in country.lower():
             country = "New Zealand"
         if "usa" in country.lower():
@@ -104,27 +84,23 @@ def fetch_property_data(url):
         city_match = re.search(r"/real_estate/([^/]+)-[a-z-]+(?:-usa)?/", url)
         city = city_match.group(1).replace("-", " ").title() if city_match else "Неизвестно"
 
-        # 5. Площадь — ищем по ключевым словам в тексте
+        # Площадь (упрощённо)
         land_area = ""
         house_area = ""
-        for elem in soup.find_all(["div", "span", "li"]):
-            text = elem.get_text(strip=True)
-            if "acre" in text.lower() and "land" in text.lower():
-                land_area = text
-            if "sqft" in text.lower() and ("living" in text.lower() or "floor" in text.lower() or "home" in text.lower()):
-                house_area = text
+        area_text = soup.find("div", string=re.compile(r"Lot|Land|Acres", re.I))
+        if area_text:
+            land_area = area_text.find_parent().text.strip()
+        area_text = soup.find("div", string=re.compile(r"Living|Floor|Home", re.I))
+        if area_text:
+            house_area = area_text.find_parent().text.strip()
 
-        # 6. Агентство
+        # Агентство
         agency = ""
         agent_elem = soup.find("div", class_="agent-name")
         if agent_elem:
             agency = agent_elem.text.strip()
-        if not agency:
-            agent_elem = soup.find("a", class_="agent")
-            if agent_elem:
-                agency = agent_elem.text.strip()
 
-        # 7. Фото
+        # Фото (одно, og:image)
         photo_url = ""
         meta_img = soup.find("meta", property="og:image")
         if meta_img and meta_img.get("content"):
@@ -146,9 +122,8 @@ def fetch_property_data(url):
         print(f"Ошибка парсинга {url}: {e}")
         return None
 
-# --- Обработчики команд ---
+# --- Команда /add ---
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавление объекта по ссылке (/add url)"""
     if not context.args:
         await update.message.reply_text("❌ Используй: /add https://www.jamesedition.com/...")
         return
@@ -175,7 +150,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-    # Формируем ответ
+    # Отправляем текстовую информацию
     msg = f"✅ *Добавлено! ID: {property_id}*\n\n"
     msg += f"🏠 *{data['title']}*\n"
     msg += f"💰 Цена: {data['price_hkd']:,.0f} HKD ≈ {data['price_rub']:,.0f} RUB\n" if data['price_hkd'] else "💰 Цена не указана\n"
@@ -189,7 +164,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"\n📎 *Ссылка:* {url}"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-    # Отправляем фото, если есть
+    # Отправляем фото
     if data['photo_url']:
         try:
             photo_response = requests.get(data['photo_url'], timeout=10)
@@ -197,8 +172,8 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+# --- Команда /list ---
 async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список объектов в папке (/list Новая Зеландия)"""
     if not context.args:
         await update.message.reply_text("❌ Укажи папку: /list Новая Зеландия")
         return
@@ -218,8 +193,8 @@ async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"📍 {row[4]}, {row[5]}\n🔗 [Ссылка]({row[6]})\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+# --- Команда /move ---
 async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Переместить объект в папку (/move id Новая Зеландия)"""
     if len(context.args) < 2:
         await update.message.reply_text("❌ Используй: /move <id> <Новая Зеландия | Европа | США>")
         return
@@ -238,6 +213,7 @@ async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ ID должен быть числом.")
 
+# --- Команда /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏡 *James Edition Трекер*\n\n"
