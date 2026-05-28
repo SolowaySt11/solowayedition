@@ -23,14 +23,6 @@ def init_db():
 
 init_db()
 
-def get_folder_from_url(url):
-    u = url.lower()
-    if "new-zealand" in u:
-        return "Новая Зеландия"
-    if "usa" in u:
-        return "США"
-    return "Европа"
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
@@ -101,76 +93,74 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     folder = query.data.split("_")[1]
-    context.user_data["add_folder"] = folder
     context.user_data["awaiting_url"] = True
+    context.user_data["add_folder"] = folder
     await query.edit_message_text("🔗 Отправь ссылку на James Edition:")
-
-async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_url"):
-        return
-    url = update.message.text.strip()
-    folder = context.user_data.pop("add_folder")
-    context.user_data.pop("awaiting_url")
-
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO properties (url, title, folder, date_added) VALUES (?, ?, ?, ?)",
-              (url, "Без названия", folder, datetime.now().isoformat()))
-    conn.commit()
-    prop_id = c.lastrowid
-    conn.close()
-
-    await update.message.reply_text(f"✅ Добавлен ID {prop_id}. Теперь нажми «✏️ Название» и «✏️ Цена» в карточке.")
-    # Показать карточку сразу
-    await show_card(update, context, folder, 0)
 
 async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     prop_id = int(query.data.split("_")[1])
+    context.user_data["awaiting_title"] = True
     context.user_data["edit_title_id"] = prop_id
     await query.edit_message_text("📝 Введи новое название:")
-
-async def save_edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "edit_title_id" not in context.user_data:
-        return
-    prop_id = context.user_data.pop("edit_title_id")
-    new_title = update.message.text.strip()
-
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    c.execute("UPDATE properties SET title = ? WHERE id = ?", (new_title, prop_id))
-    c.execute("SELECT folder FROM properties WHERE id = ?", (prop_id,))
-    folder = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(f"✅ Название изменено на «{new_title}».")
-    await start(update, context)
 
 async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     prop_id = int(query.data.split("_")[1])
+    context.user_data["awaiting_price"] = True
     context.user_data["edit_price_id"] = prop_id
     await query.edit_message_text("💰 Введи новую цену:")
 
-async def save_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "edit_price_id" not in context.user_data:
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Единый обработчик всех текстовых сообщений"""
+    
+    # Обработка добавления ссылки
+    if context.user_data.get("awaiting_url"):
+        url = update.message.text.strip()
+        folder = context.user_data.pop("add_folder")
+        context.user_data.pop("awaiting_url")
+
+        conn = sqlite3.connect("edition.db")
+        c = conn.cursor()
+        c.execute("INSERT INTO properties (url, title, folder, date_added) VALUES (?, ?, ?, ?)",
+                  (url, "Без названия", folder, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+
+        await update.message.reply_text(f"✅ Ссылка добавлена. Теперь нажми «✏️ Название» и «✏️ Цена» в карточке.")
         return
-    prop_id = context.user_data.pop("edit_price_id")
-    new_price = update.message.text.strip()
 
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    c.execute("UPDATE properties SET price = ? WHERE id = ?", (new_price, prop_id))
-    c.execute("SELECT folder FROM properties WHERE id = ?", (prop_id,))
-    folder = c.fetchone()[0]
-    conn.commit()
-    conn.close()
+    # Обработка изменения названия
+    if context.user_data.get("awaiting_title"):
+        prop_id = context.user_data.pop("edit_title_id")
+        context.user_data.pop("awaiting_title")
+        new_title = update.message.text.strip()
 
-    await update.message.reply_text(f"✅ Цена изменена на {new_price}.")
-    await start(update, context)
+        conn = sqlite3.connect("edition.db")
+        c = conn.cursor()
+        c.execute("UPDATE properties SET title = ? WHERE id = ?", (new_title, prop_id))
+        conn.commit()
+        conn.close()
+
+        await update.message.reply_text(f"✅ Название изменено на «{new_title}».")
+        return
+
+    # Обработка изменения цены
+    if context.user_data.get("awaiting_price"):
+        prop_id = context.user_data.pop("edit_price_id")
+        context.user_data.pop("awaiting_price")
+        new_price = update.message.text.strip()
+
+        conn = sqlite3.connect("edition.db")
+        c = conn.cursor()
+        c.execute("UPDATE properties SET price = ? WHERE id = ?", (new_price, prop_id))
+        conn.commit()
+        conn.close()
+
+        await update.message.reply_text(f"✅ Цена изменена на {new_price}.")
+        return
 
 async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -198,7 +188,6 @@ async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     await query.edit_message_text(f"✅ Объект перемещён в папку «{new_folder}».")
-    await start(update, context)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -206,7 +195,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data.startswith("folder_"):
-        folder = data[7:]
+        folder = data.split("_", 1)[1]
         await show_card(update, context, folder, 0)
     elif data.startswith("card_"):
         await card_nav(update, context)
@@ -216,18 +205,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit_price(update, context)
     elif data.startswith("title_"):
         await edit_title(update, context)
-    elif data.startswith("move_"):
-        await ask_move(update, context)
     elif data.startswith("move_to_"):
         await move_to(update, context)
+    elif data.startswith("move_"):
+        await ask_move(update, context)
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
+    # Только ОДИН обработчик текстовых сообщений
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("Бот запущен...")
     app.run_polling()
 
