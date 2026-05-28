@@ -103,7 +103,7 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление ---
+# --- Добавление (только ссылка, затем редактирование) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -124,50 +124,17 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute("""
         INSERT INTO properties (url, title, folder, date_added)
         VALUES (?, ?, ?, ?)
-    """, (url, "Временное название", folder, datetime.now().isoformat()))
+    """, (url, "Без названия", folder, datetime.now().isoformat()))
     conn.commit()
     prop_id = c.lastrowid
     conn.close()
 
-    context.user_data["add_id"] = prop_id
-    context.user_data["awaiting_title_price"] = True
-    await update.message.reply_text(f"✅ Объект создан (ID {prop_id})\n📝 Теперь отправь **название и цену** в одном сообщении через запятую.\nПример: *Дом у озера, 1 500 000 USD*", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Добавлен ID {prop_id}. Теперь нажми «✏️ Название» и «✏️ Цена» в карточке, чтобы заполнить данные.")
 
-# --- Сохранение названия и цены + показ карточки ---
-async def save_title_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_title_price"):
-        return
-    prop_id = context.user_data.pop("add_id")
-    context.user_data.pop("awaiting_title_price")
-
-    text = update.message.text.strip()
-    parts = text.split(",", 1)
-    if len(parts) != 2:
-        await update.message.reply_text("❌ Нужно: *Название, Цена*\nПример: *Дом у озера, 1 500 000 USD*", parse_mode="Markdown")
-        return
-
-    title = parts[0].strip()
-    price = parts[1].strip()
-
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    c.execute("UPDATE properties SET title = ?, price = ? WHERE id = ?", (title, price, prop_id))
-    conn.commit()
-    conn.close()
-
-    # Получаем папку объекта
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    c.execute("SELECT folder FROM properties WHERE id = ?", (prop_id,))
-    folder = c.fetchone()[0]
-    conn.close()
-
-    await update.message.reply_text("✅ Название и цена сохранены! Показываю карточку:")
-
-    # Имитируем нажатие на папку, чтобы показать карточку
+    # Показать карточку только что созданного объекта
     await show_card(update, context, folder, 0)
 
-# --- Редактирование ---
+# --- Редактирование названия ---
 async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -186,7 +153,10 @@ async def save_edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     await update.message.reply_text("✅ Название изменено.")
+    # Показываем обновлённую карточку
+    await start(update, context)
 
+# --- Редактирование цены ---
 async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -205,6 +175,8 @@ async def save_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     await update.message.reply_text("✅ Цена изменена.")
+    # Показываем обновлённую карточку
+    await start(update, context)
 
 # --- Перемещение ---
 async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,6 +205,7 @@ async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     await query.edit_message_text(f"✅ Объект перемещён в папку «{new_folder}».")
+    await start(update, context)
 
 # --- Главный callback ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,10 +234,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_title_price))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
-    print("Бот запущен...")
+    print("James Edition бут (редактирование через кнопки) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
