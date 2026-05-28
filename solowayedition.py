@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import sqlite3
 from datetime import datetime
 
@@ -32,7 +32,7 @@ def get_folder_from_url(url):
         return "США"
     return "Европа"
 
-# --- Главное меню ---
+# --- Главное меню (только кнопки) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
@@ -55,7 +55,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     conn.close()
 
     if not rows:
-        keyboard = [[InlineKeyboardButton("➕ Добавить объект", callback_data=f"add_{folder}")]]
+        keyboard = [[InlineKeyboardButton("➕ Добавить", callback_data=f"add_{folder}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.callback_query.edit_message_text(
             f"📂 *{folder}*\n\nПока ничего нет.",
@@ -79,8 +79,8 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     keyboard = [
         [InlineKeyboardButton("🔗 Открыть ссылку", url=url)],
         [
-            InlineKeyboardButton("◀️ Назад", callback_data=f"card_{folder}_prev"),
-            InlineKeyboardButton("Вперёд ▶️", callback_data=f"card_{folder}_next")
+            InlineKeyboardButton("◀️", callback_data=f"card_{folder}_prev"),
+            InlineKeyboardButton("▶️", callback_data=f"card_{folder}_next")
         ],
         [
             InlineKeyboardButton("➕ Добавить", callback_data=f"add_{folder}"),
@@ -103,39 +103,78 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление (через команду /add) ---
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 4:
-        await update.message.reply_text(
-            "❌ Используй: /add <ссылка> <название> <цена> <папка>\n"
-            "Пример:\n/add https://... Мой дом 1 500 000 USD Новая Зеландия"
-        )
-        return
-    url = context.args[0]
-    title = " ".join(context.args[1:-2])
-    price = context.args[-2]
-    folder = context.args[-1]
+# --- Добавление (пошаговое, только кнопки) ---
+async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    folder = query.data.split("_")[1]
+    context.user_data["add_folder"] = folder
+    context.user_data["add_step"] = "url"
+    await query.edit_message_text("🔗 Отправь ссылку на James Edition:")
 
-    if folder not in ["Новая Зеландия", "США", "Европа"]:
-        await update.message.reply_text("❌ Папка должна быть: Новая Зеландия, США или Европа")
+async def handle_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("add_step")
+    if step != "url":
         return
+
+    url = update.message.text.strip()
+    folder = context.user_data["add_folder"]
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO properties (url, title, folder, date_added)
+        VALUES (?, ?, ?, ?)
+    """, (url, "Без названия", folder, datetime.now().isoformat()))
+    conn.commit()
+    prop_id = c.lastrowid
+    conn.close()
+
+    context.user_data["add_id"] = prop_id
+    context.user_data["add_step"] = "title"
+    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n📝 Теперь отправь **название**:")
+
+async def handle_title_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("add_step")
+    if step != "title":
+        return
+    prop_id = context.user_data["add_id"]
+    title = update.message.text.strip()
 
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
-    try:
-        c.execute("""
-            INSERT INTO properties (url, title, price, folder, date_added)
-            VALUES (?, ?, ?, ?, ?)
-        """, (url, title, price, folder, datetime.now().isoformat()))
-        conn.commit()
-        prop_id = c.lastrowid
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        return
-    finally:
-        conn.close()
+    c.execute("UPDATE properties SET title = ? WHERE id = ?", (title, prop_id))
+    conn.commit()
+    conn.close()
 
-    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})")
+    context.user_data["add_step"] = "price"
+    await update.message.reply_text(f"✅ Название сохранено!\n💰 Теперь отправь **цену**:")
+
+async def handle_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("add_step")
+    if step != "price":
+        return
+    prop_id = context.user_data.pop("add_id")
+    price = update.message.text.strip()
+
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET price = ? WHERE id = ?", (price, prop_id))
+    conn.commit()
+    conn.close()
+
+    context.user_data.pop("add_folder", None)
+    context.user_data.pop("add_step", None)
+
+    await update.message.reply_text("✅ Объект полностью добавлен!")
+
+    # Показать главное меню
+    keyboard = [
+        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
+        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
+        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("👇 *Выбери папку, чтобы увидеть объект:*", reply_markup=reply_markup, parse_mode="Markdown")
 
 # --- Редактирование ---
 async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,7 +255,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("card_"):
         await card_nav(update, context)
     elif data.startswith("add_"):
-        await update.callback_query.edit_message_text("➕ Используй команду:\n/add <ссылка> <название> <цена> <папка>")
+        await start_add(update, context)
     elif data.startswith("price_"):
         await edit_price(update, context)
     elif data.startswith("title_"):
@@ -229,11 +268,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_price_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
-    print("Бот запущен...")
+    print("James Edition бот (полностью кнопочный) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
