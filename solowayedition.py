@@ -1,4 +1,4 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import sqlite3
 from datetime import datetime
@@ -64,7 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# --- Показать одну карточку ---
+# --- Показать карточку ---
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, index=0):
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
@@ -75,10 +75,11 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     if not rows:
         keyboard = [[InlineKeyboardButton("➕ Добавить объект", callback_data=f"add_{folder}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        if update.callback_query:
-            await update.callback_query.edit_message_text(f"📂 *{folder}*\n\nПока ничего нет.", parse_mode="Markdown", reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(f"📂 *{folder}*\n\nПока ничего нет.", parse_mode="Markdown", reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(
+            f"📂 *{folder}*\n\nПока ничего нет.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
         return
 
     if index < 0:
@@ -99,8 +100,11 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
             InlineKeyboardButton("◀️ Назад", callback_data=f"card_{folder}_prev"),
             InlineKeyboardButton("Вперёд ▶️", callback_data=f"card_{folder}_next")
         ],
-        [InlineKeyboardButton("➕ Добавить объект", callback_data=f"add_{folder}"),
-         InlineKeyboardButton("✏️ Цена", callback_data=f"price_{prop_id}")],
+        [
+            InlineKeyboardButton("➕ Добавить", callback_data=f"add_{folder}"),
+            InlineKeyboardButton("✏️ Цена", callback_data=f"price_{prop_id}"),
+            InlineKeyboardButton("🖼 Фото", callback_data=f"photo_{prop_id}")
+        ],
         [InlineKeyboardButton("🗑 Переместить", callback_data=f"move_{prop_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -117,7 +121,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     else:
         await update.callback_query.edit_message_text(caption, parse_mode="Markdown", reply_markup=reply_markup)
 
-# --- Навигация по карточкам ---
+# --- Навигация ---
 async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -159,7 +163,7 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
     context.user_data["awaiting_price"] = prop_id
-    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n💰 Теперь отправь цену (например: 1 500 000 USD):")
+    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n💰 Теперь отправь цену:")
 
 async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "awaiting_price" not in context.user_data:
@@ -181,7 +185,37 @@ async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👇 Выбери папку, чтобы увидеть объект:", reply_markup=reply_markup)
+    await update.message.reply_text("👇 Выбери папку:", reply_markup=reply_markup)
+
+# --- Ручное добавление фото ---
+async def ask_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    prop_id = int(query.data.split("_")[1])
+    context.user_data["photo_id"] = prop_id
+    await query.edit_message_text("🖼 Отправь ссылку на фото (прямую ссылку, например: https://...jpg):")
+
+async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "photo_id" not in context.user_data:
+        return
+    prop_id = context.user_data.pop("photo_id")
+    photo_url = update.message.text.strip()
+
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET photo = ? WHERE id = ?", (photo_url, prop_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text("✅ Фото сохранено!")
+
+    keyboard = [
+        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
+        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
+        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("👇 Выбери папку, чтобы увидеть объект с фото:", reply_markup=reply_markup)
 
 # --- Перемещение ---
 async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,6 +262,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prop_id = int(data.split("_")[1])
         context.user_data["awaiting_price"] = prop_id
         await query.edit_message_text("💰 Введи новую цену:")
+    elif data.startswith("photo_"):
+        await ask_photo(update, context)
     elif data.startswith("move_"):
         await ask_move(update, context)
     elif data.startswith("move_to_"):
@@ -239,7 +275,8 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_price))
-    print("James Edition бот (галерея) запущен...")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_photo))
+    print("James Edition бот (галерея + ручное фото) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
