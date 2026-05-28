@@ -1,11 +1,10 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import requests
 from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 import re
-import os
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
@@ -35,7 +34,6 @@ def init_db():
 
 init_db()
 
-# --- Курс HKD -> RUB ---
 def get_exchange_rate():
     try:
         r = requests.get("https://api.exchangerate-api.com/v4/latest/HKD", timeout=10)
@@ -44,12 +42,9 @@ def get_exchange_rate():
     except:
         return 12.0
 
-# --- Парсинг James Edition ---
 def fetch_property_data(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -69,7 +64,6 @@ def fetch_property_data(url):
                 if match:
                     price_hkd = float(match.group().replace(",", ""))
 
-        # Конвертация в рубли
         rate = get_exchange_rate()
         price_rub = round(price_hkd * rate, 2) if price_hkd else None
 
@@ -84,7 +78,7 @@ def fetch_property_data(url):
         city_match = re.search(r"/real_estate/([^/]+)-[a-z-]+(?:-usa)?/", url)
         city = city_match.group(1).replace("-", " ").title() if city_match else "Неизвестно"
 
-        # Площадь (упрощённо)
+        # Площадь
         land_area = ""
         house_area = ""
         area_text = soup.find("div", string=re.compile(r"Lot|Land|Acres", re.I))
@@ -100,7 +94,7 @@ def fetch_property_data(url):
         if agent_elem:
             agency = agent_elem.text.strip()
 
-        # Фото (одно, og:image)
+        # Фото (одно)
         photo_url = ""
         meta_img = soup.find("meta", property="og:image")
         if meta_img and meta_img.get("content"):
@@ -122,13 +116,33 @@ def fetch_property_data(url):
         print(f"Ошибка парсинга {url}: {e}")
         return None
 
-# --- Команда /add ---
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Используй: /add https://www.jamesedition.com/...")
+# --- Состояние диалога ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("➕ Добавить объект", callback_data="add_object")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "🏡 *James Edition Трекер*\n\n"
+        "Нажми кнопку и отправь ссылку на недвижимость с James Edition.",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "add_object":
+        await query.edit_message_text("📎 Отправь ссылку на объект James Edition:")
+        context.user_data["awaiting_url"] = True
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_url"):
         return
-    url = context.args[0]
-    await update.message.reply_text("🔄 Получаю данные с James Edition...")
+    url = update.message.text.strip()
+    if not url.startswith("https://www.jamesedition.com/"):
+        await update.message.reply_text("❌ Это не похоже на ссылку James Edition. Попробуй ещё раз.")
+        return
+    context.user_data["awaiting_url"] = False
+    await update.message.reply_text("🔄 Получаю данные...")
     data = fetch_property_data(url)
     if not data:
         await update.message.reply_text("❌ Не удалось получить данные по ссылке.")
@@ -150,7 +164,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-    # Отправляем текстовую информацию
+    # Текст
     msg = f"✅ *Добавлено! ID: {property_id}*\n\n"
     msg += f"🏠 *{data['title']}*\n"
     msg += f"💰 Цена: {data['price_hkd']:,.0f} HKD ≈ {data['price_rub']:,.0f} RUB\n" if data['price_hkd'] else "💰 Цена не указана\n"
@@ -164,7 +178,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"\n📎 *Ссылка:* {url}"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-    # Отправляем фото
+    # Фото
     if data['photo_url']:
         try:
             photo_response = requests.get(data['photo_url'], timeout=10)
@@ -172,7 +186,7 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# --- Команда /list ---
+# --- Остальные команды (список, перемещение) ---
 async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Укажи папку: /list Новая Зеландия")
@@ -193,7 +207,6 @@ async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"📍 {row[4]}, {row[5]}\n🔗 [Ссылка]({row[6]})\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# --- Команда /move ---
 async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("❌ Используй: /move <id> <Новая Зеландия | Европа | США>")
@@ -213,22 +226,11 @@ async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ ID должен быть числом.")
 
-# --- Команда /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🏡 *James Edition Трекер*\n\n"
-        "Команды:\n"
-        "/add <url> — добавить объект\n"
-        "/list <папка> — показать объекты в папке (Новая Зеландия, Европа, США)\n"
-        "/move <id> <папка> — переместить объект в папку\n"
-        "/start — это сообщение",
-        parse_mode="Markdown"
-    )
-
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_handler(CommandHandler("list", list_properties))
     app.add_handler(CommandHandler("move", move))
     print("James Edition бот запущен...")
