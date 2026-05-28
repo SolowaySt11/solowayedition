@@ -50,8 +50,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# --- Показать объекты в папке + кнопка "Добавить" ---
-async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, page=0):
+# --- Показать объекты в папке (без ошибки NoneType) ---
+async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, page=0, message=None):
     limit = 5
     offset = page * limit
     conn = sqlite3.connect("edition.db")
@@ -77,7 +77,12 @@ async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder
     keyboard.append([InlineKeyboardButton("➕ Добавить объект", callback_data=f"add_{folder}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+    if message:
+        await message.edit_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+    else:
+        query = update.callback_query
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
 
 # --- Начало добавления (просим ссылку) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,12 +182,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("folder_"):
         folder = data[7:]
-        await show_folder(update, context, folder, 0)
+        await show_folder(update, context, folder, 0, message=query.message)
     elif data.startswith("page_"):
         parts = data.split("_")
         folder = parts[1]
         page = int(parts[2])
-        await show_folder(update, context, folder, page)
+        await show_folder(update, context, folder, page, message=query.message)
     elif data.startswith("add_"):
         await start_add(update, context)
     elif data.startswith("price_"):
