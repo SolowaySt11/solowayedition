@@ -103,7 +103,7 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление (ссылка → [название, цена]) ---
+# --- Добавление ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -133,6 +133,7 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_title_price"] = True
     await update.message.reply_text(f"✅ Объект создан (ID {prop_id})\n📝 Теперь отправь **название и цену** в одном сообщении через запятую.\nПример: *Дом у озера, 1 500 000 USD*", parse_mode="Markdown")
 
+# --- Сохранение названия и цены + показ карточки ---
 async def save_title_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("awaiting_title_price"):
         return
@@ -154,15 +155,17 @@ async def save_title_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text("✅ Название и цена сохранены!")
+    # Получаем папку объекта
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("SELECT folder FROM properties WHERE id = ?", (prop_id,))
+    folder = c.fetchone()[0]
+    conn.close()
 
-    keyboard = [
-        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
-        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
-        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👇 *Выбери папку, чтобы увидеть объект:*", reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text("✅ Название и цена сохранены! Показываю карточку:")
+
+    # Имитируем нажатие на папку, чтобы показать карточку
+    await show_card(update, context, folder, 0)
 
 # --- Редактирование ---
 async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
