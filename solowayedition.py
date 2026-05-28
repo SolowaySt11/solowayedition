@@ -44,6 +44,7 @@ def get_exchange_rate():
         return 12.0
 
 def fetch_property_data(url):
+    print(f"🔍 Запрос к {url}")
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -53,37 +54,46 @@ def fetch_property_data(url):
             "Connection": "keep-alive"
         }
         response = requests.get(url, headers=headers, timeout=30)
-        soup = BeautifulSoup(response.text, 'html.parser')
-                # Диагностика: сохраняем HTML в файл
+        print(f"📡 Статус ответа: {response.status_code}")
+        
+        # Сохраняем HTML для отладки
         with open("debug.html", "w", encoding="utf-8") as f:
             f.write(response.text)
-        print("Страница сохранена в debug.html")
+        print("💾 Страница сохранена в debug.html")
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
 
         # Название
         title = soup.find("meta", property="og:title")
         title = title["content"].strip() if title else "Без названия"
+        print(f"📌 Название: {title}")
 
         # Цена (HKD)
         price_hkd = None
         meta_price = soup.find("meta", property="og:price:amount")
         if meta_price and meta_price.get("content"):
             price_hkd = float(meta_price["content"])
+            print(f"💰 Цена из og:price:amount: {price_hkd}")
+        
         if not price_hkd:
             for script in soup.find_all("script", type="application/ld+json"):
                 try:
                     data = json.loads(script.string)
                     if data.get("@type") == "Product" and data.get("offers"):
                         price_hkd = float(data["offers"]["price"])
+                        print(f"💰 Цена из JSON-LD: {price_hkd}")
                         break
                 except:
                     pass
+        
         if not price_hkd:
             price_span = soup.find("span", class_="price")
             if price_span:
                 match = re.search(r"[\d,]+\.?\d*", price_span.text)
                 if match:
                     price_hkd = float(match.group().replace(",", ""))
-
+                    print(f"💰 Цена из span.price: {price_hkd}")
+        
         rate = get_exchange_rate()
         price_rub = round(price_hkd * rate, 2) if price_hkd else None
 
@@ -119,6 +129,7 @@ def fetch_property_data(url):
         meta_img = soup.find("meta", property="og:image")
         if meta_img and meta_img.get("content"):
             photo_url = meta_img["content"]
+            print(f"🖼️ Фото найдено: {photo_url[:50]}...")
 
         return {
             "title": title,
@@ -133,7 +144,7 @@ def fetch_property_data(url):
             "url": url
         }
     except Exception as e:
-        print(f"Ошибка парсинга {url}: {e}")
+        print(f"❌ Ошибка парсинга {url}: {e}")
         return None
 
 # --- Команды ---
