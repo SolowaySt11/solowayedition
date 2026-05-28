@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 import re
+import json
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
@@ -44,8 +45,14 @@ def get_exchange_rate():
 
 def fetch_property_data(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=15)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.jamesedition.com/",
+            "Connection": "keep-alive"
+        }
+        response = requests.get(url, headers=headers, timeout=30)
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # Название
@@ -57,6 +64,15 @@ def fetch_property_data(url):
         meta_price = soup.find("meta", property="og:price:amount")
         if meta_price and meta_price.get("content"):
             price_hkd = float(meta_price["content"])
+        if not price_hkd:
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    data = json.loads(script.string)
+                    if data.get("@type") == "Product" and data.get("offers"):
+                        price_hkd = float(data["offers"]["price"])
+                        break
+                except:
+                    pass
         if not price_hkd:
             price_span = soup.find("span", class_="price")
             if price_span:
@@ -94,7 +110,7 @@ def fetch_property_data(url):
         if agent_elem:
             agency = agent_elem.text.strip()
 
-        # Фото (одно)
+        # Фото
         photo_url = ""
         meta_img = soup.find("meta", property="og:image")
         if meta_img and meta_img.get("content"):
@@ -116,15 +132,14 @@ def fetch_property_data(url):
         print(f"Ошибка парсинга {url}: {e}")
         return None
 
-# --- Состояние диалога ---
+# --- Команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("➕ Добавить объект", callback_data="add_object")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🏡 *James Edition Трекер*\n\n"
+        "🏡 James Edition Трекер\n\n"
         "Нажми кнопку и отправь ссылку на недвижимость с James Edition.",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        reply_markup=reply_markup
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -164,21 +179,22 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-    # Текст
-    msg = f"✅ *Добавлено! ID: {property_id}*\n\n"
-    msg += f"🏠 *{data['title']}*\n"
-    msg += f"💰 Цена: {data['price_hkd']:,.0f} HKD ≈ {data['price_rub']:,.0f} RUB\n" if data['price_hkd'] else "💰 Цена не указана\n"
-    msg += f"📍 *{data['city']}, {data['country']}*\n"
+    msg = f"✅ Добавлено! ID: {property_id}\n\n"
+    msg += f"🏠 {data['title']}\n"
+    if data['price_hkd']:
+        msg += f"💰 Цена: {data['price_hkd']:,.0f} HKD ≈ {data['price_rub']:,.0f} RUB\n"
+    else:
+        msg += "💰 Цена не указана\n"
+    msg += f"📍 {data['city']}, {data['country']}\n"
     if data['land_area']:
         msg += f"🌿 Участок: {data['land_area']}\n"
     if data['house_area']:
         msg += f"🏡 Дом: {data['house_area']}\n"
     if data['agency']:
         msg += f"🏢 Агентство: {data['agency']}\n"
-    msg += f"\n📎 *Ссылка:* {url}"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    msg += f"\n📎 Ссылка: {url}"
+    await update.message.reply_text(msg)
 
-    # Фото
     if data['photo_url']:
         try:
             photo_response = requests.get(data['photo_url'], timeout=10)
@@ -186,7 +202,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# --- Остальные команды (список, перемещение) ---
 async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Укажи папку: /list Новая Зеландия")
@@ -200,12 +215,15 @@ async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text(f"📭 В папке «{folder}» пока нет объектов.")
         return
-    msg = f"📂 *Папка: {folder}*\n\n"
+    msg = f"📂 Папка: {folder}\n\n"
     for row in rows:
-        msg += f"*ID {row[0]}* — {row[1]}\n"
-        msg += f"💰 {row[2]:,.0f} HKD ≈ {row[3]:,.0f} RUB\n" if row[2] else "💰 Цена не указана\n"
-        msg += f"📍 {row[4]}, {row[5]}\n🔗 [Ссылка]({row[6]})\n\n"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+        msg += f"ID {row[0]} — {row[1]}\n"
+        if row[2]:
+            msg += f"💰 {row[2]:,.0f} HKD ≈ {row[3]:,.0f} RUB\n"
+        else:
+            msg += "💰 Цена не указана\n"
+        msg += f"📍 {row[4]}, {row[5]}\n🔗 {row[6]}\n\n"
+    await update.message.reply_text(msg)
 
 async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
