@@ -102,37 +102,42 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление (простое, без запутанных состояний) ---
+# --- Добавление (пошаговое, надёжное) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     folder = query.data.split("_")[1]
     context.user_data["add_folder"] = folder
+    context.user_data["add_step"] = "url"
     await query.edit_message_text("🔗 Отправь ссылку на объект James Edition:")
 
-async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "add_folder" not in context.user_data:
+async def handle_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("add_step")
+    if step != "url":
         return
-    url = update.message.text.strip()
-    folder = context.user_data.pop("add_folder")
 
+    url = update.message.text.strip()
+    folder = context.user_data["add_folder"]
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
     c.execute("""
         INSERT INTO properties (url, title, folder, date_added)
         VALUES (?, ?, ?, ?)
-    """, (url, "Без названия", folder, datetime.now().isoformat()))
+    """, (url, "Временное название", folder, datetime.now().isoformat()))
     conn.commit()
     prop_id = c.lastrowid
     conn.close()
 
-    context.user_data["new_property_id"] = prop_id
-    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n📝 Отправь название объекта:")
+    context.user_data["add_id"] = prop_id
+    context.user_data["add_step"] = "title"
+    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n📝 Теперь отправь **название** объекта:")
 
-async def save_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "new_property_id" not in context.user_data:
+async def handle_title_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("add_step")
+    if step != "title":
         return
-    prop_id = context.user_data.pop("new_property_id")
+
+    prop_id = context.user_data["add_id"]
     title = update.message.text.strip()
 
     conn = sqlite3.connect("edition.db")
@@ -141,13 +146,15 @@ async def save_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    context.user_data["price_property_id"] = prop_id
-    await update.message.reply_text(f"✅ Название сохранено!\n💰 Теперь отправь цену (например: 1 500 000 USD):")
+    context.user_data["add_step"] = "price"
+    await update.message.reply_text(f"✅ Название сохранено!\n💰 Теперь отправь **цену** (например: 1 500 000 USD):")
 
-async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "price_property_id" not in context.user_data:
+async def handle_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("add_step")
+    if step != "price":
         return
-    prop_id = context.user_data.pop("price_property_id")
+
+    prop_id = context.user_data.pop("add_id")
     price = update.message.text.strip()
 
     conn = sqlite3.connect("edition.db")
@@ -156,9 +163,11 @@ async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
+    context.user_data.pop("add_folder", None)
+    context.user_data.pop("add_step", None)
+
     await update.message.reply_text("✅ Объект полностью добавлен!")
 
-    # Показать главное меню
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
         [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
@@ -228,12 +237,12 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_title))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_price))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_price_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
-    print("James Edition бот (простой) запущен...")
+    print("James Edition бот (надёжный пошаговый) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
