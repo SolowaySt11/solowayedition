@@ -274,7 +274,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_price_input))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
-    print("James Edition бот (полностью кнопочный) запущен...")
+    print("Бот запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
