@@ -54,6 +54,10 @@ def fetch_property_data(url):
         }
         response = requests.get(url, headers=headers, timeout=30)
         soup = BeautifulSoup(response.text, 'html.parser')
+                # Диагностика: сохраняем HTML в файл
+        with open("debug.html", "w", encoding="utf-8") as f:
+            f.write(response.text)
+        print("Страница сохранена в debug.html")
 
         # Название
         title = soup.find("meta", property="og:title")
