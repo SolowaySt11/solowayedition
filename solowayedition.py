@@ -3,7 +3,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import sqlite3
 from datetime import datetime
 import requests
-from bs4 import BeautifulSoup
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
@@ -14,7 +13,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS properties (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT UNIQUE,
+            url TEXT,
             title TEXT,
             price TEXT,
             photo TEXT,
@@ -33,22 +32,7 @@ def get_folder_from_url(url):
         return "Новая Зеландия"
     if "usa" in u:
         return "США"
-    if "italy" in u or "spain" in u or "france" in u:
-        return "Европа"
-    return "Другая страна"
-
-def try_get_photo(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            meta = soup.find("meta", property="og:image")
-            if meta and meta.get("content"):
-                return meta["content"]
-    except:
-        pass
-    return None
+    return "Европа"
 
 # --- Главное меню ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,7 +89,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
             InlineKeyboardButton("✏️ Цена", callback_data=f"price_{prop_id}"),
             InlineKeyboardButton("🖼 Фото", callback_data=f"photo_{prop_id}")
         ],
-        [InlineKeyboardButton("🗑 Переместить", callback_data=f"move_{prop_id}")]
+        [InlineKeyboardButton("✏️ Название", callback_data=f"title_{prop_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -132,43 +116,59 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление ---
+# --- Добавление (ручное) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     folder = query.data.split("_")[1]
     context.user_data["add_folder"] = folder
-    await query.edit_message_text("🔗 Отправь ссылку на объект James Edition:")
+    await query.edit_message_text("🔗 Отправь ссылку на объект James Edition (можно просто как ссылку):")
 
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "add_folder" not in context.user_data:
         return
     url = update.message.text.strip()
     folder = context.user_data.pop("add_folder")
-    photo = try_get_photo(url)
 
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
-    try:
-        c.execute("""
-            INSERT INTO properties (url, title, photo, folder, date_added)
-            VALUES (?, ?, ?, ?, ?)
-        """, (url, "Без названия", photo, folder, datetime.now().isoformat()))
-        conn.commit()
-        prop_id = c.lastrowid
-    except sqlite3.IntegrityError:
-        await update.message.reply_text("⚠️ Объект уже есть.")
-        return
-    finally:
-        conn.close()
+    c.execute("""
+        INSERT INTO properties (url, title, folder, date_added)
+        VALUES (?, ?, ?, ?)
+    """, (url, "Без названия", folder, datetime.now().isoformat()))
+    conn.commit()
+    prop_id = c.lastrowid
+    conn.close()
 
-    context.user_data["awaiting_price"] = prop_id
-    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n💰 Теперь отправь цену:")
+    context.user_data["awaiting_data"] = {"id": prop_id, "step": "title"}
+    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n📝 Теперь отправь **название** объекта:")
+
+async def save_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "awaiting_data" not in context.user_data:
+        return
+    data = context.user_data["awaiting_data"]
+    if data.get("step") != "title":
+        return
+    prop_id = data["id"]
+    title = update.message.text.strip()
+
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET title = ? WHERE id = ?", (title, prop_id))
+    conn.commit()
+    conn.close()
+
+    data["step"] = "price"
+    context.user_data["awaiting_data"] = data
+    await update.message.reply_text(f"✅ Название сохранено!\n💰 Теперь отправь **цену** (например: 1 500 000 USD):")
 
 async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "awaiting_price" not in context.user_data:
+    if "awaiting_data" not in context.user_data:
         return
-    prop_id = context.user_data.pop("awaiting_price")
+    data = context.user_data["awaiting_data"]
+    if data.get("step") != "price":
+        return
+    prop_id = data["id"]
     price = update.message.text.strip()
 
     conn = sqlite3.connect("edition.db")
@@ -177,28 +177,17 @@ async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text("✅ Цена сохранена!")
-
-    keyboard = [
-        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
-        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
-        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👇 Выбери папку:", reply_markup=reply_markup)
-
-# --- Ручное добавление фото ---
-async def ask_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    prop_id = int(query.data.split("_")[1])
-    context.user_data["photo_id"] = prop_id
-    await query.edit_message_text("🖼 Отправь ссылку на фото (прямую ссылку, например: https://...jpg):")
+    data["step"] = "photo"
+    context.user_data["awaiting_data"] = data
+    await update.message.reply_text(f"✅ Цена сохранена!\n🖼 Теперь отправь **прямую ссылку на фото** (можно с любого сайта):")
 
 async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "photo_id" not in context.user_data:
+    if "awaiting_data" not in context.user_data:
         return
-    prop_id = context.user_data.pop("photo_id")
+    data = context.user_data.pop("awaiting_data")
+    if data.get("step") != "photo":
+        return
+    prop_id = data["id"]
     photo_url = update.message.text.strip()
 
     conn = sqlite3.connect("edition.db")
@@ -207,43 +196,76 @@ async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text("✅ Фото сохранено!")
+    await update.message.reply_text("✅ Фото сохранено! Объект полностью добавлен.")
 
+    # Показать меню
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
         [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
         [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👇 Выбери папку, чтобы увидеть объект с фото:", reply_markup=reply_markup)
+    await update.message.reply_text("👇 Выбери папку, чтобы увидеть добавленный объект:", reply_markup=reply_markup)
 
-# --- Перемещение ---
-async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Редактирование названия ---
+async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     prop_id = int(query.data.split("_")[1])
-    context.user_data["move_id"] = prop_id
-    keyboard = [
-        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="move_to_Новая Зеландия")],
-        [InlineKeyboardButton("🇺🇸 США", callback_data="move_to_США")],
-        [InlineKeyboardButton("🇪🇺 Европа", callback_data="move_to_Европа")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("🗂 Выбери новую папку:", reply_markup=reply_markup)
+    context.user_data["edit_title_id"] = prop_id
+    await query.edit_message_text("📝 Введи новое название:")
 
-async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if "move_id" not in context.user_data:
+async def save_edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "edit_title_id" not in context.user_data:
         return
-    prop_id = context.user_data.pop("move_id")
-    new_folder = query.data.split("_")[2]
+    prop_id = context.user_data.pop("edit_title_id")
+    new_title = update.message.text.strip()
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
-    c.execute("UPDATE properties SET folder = ? WHERE id = ?", (new_folder, prop_id))
+    c.execute("UPDATE properties SET title = ? WHERE id = ?", (new_title, prop_id))
     conn.commit()
     conn.close()
-    await query.edit_message_text(f"✅ Объект перемещён в папку «{new_folder}».")
+    await update.message.reply_text("✅ Название изменено.")
+
+# --- Редактирование цены ---
+async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    prop_id = int(query.data.split("_")[1])
+    context.user_data["edit_price_id"] = prop_id
+    await query.edit_message_text("💰 Введи новую цену:")
+
+async def save_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "edit_price_id" not in context.user_data:
+        return
+    prop_id = context.user_data.pop("edit_price_id")
+    new_price = update.message.text.strip()
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET price = ? WHERE id = ?", (new_price, prop_id))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("✅ Цена изменена.")
+
+# --- Ручное фото ---
+async def edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    prop_id = int(query.data.split("_")[1])
+    context.user_data["edit_photo_id"] = prop_id
+    await query.edit_message_text("🖼 Отправь новую прямую ссылку на фото:")
+
+async def save_edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "edit_photo_id" not in context.user_data:
+        return
+    prop_id = context.user_data.pop("edit_photo_id")
+    photo_url = update.message.text.strip()
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET photo = ? WHERE id = ?", (photo_url, prop_id))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("✅ Фото обновлено.")
 
 # --- Главный callback ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,24 +281,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("add_"):
         await start_add(update, context)
     elif data.startswith("price_"):
-        prop_id = int(data.split("_")[1])
-        context.user_data["awaiting_price"] = prop_id
-        await query.edit_message_text("💰 Введи новую цену:")
+        await edit_price(update, context)
     elif data.startswith("photo_"):
-        await ask_photo(update, context)
-    elif data.startswith("move_"):
-        await ask_move(update, context)
-    elif data.startswith("move_to_"):
-        await move_to(update, context)
+        await edit_photo(update, context)
+    elif data.startswith("title_"):
+        await edit_title(update, context)
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_price))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_photo))
-    print("James Edition бот (галерея + ручное фото) запущен...")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_photo))
+    print("James Edition бот (полностью ручной) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
