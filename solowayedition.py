@@ -32,7 +32,7 @@ def get_folder_from_url(url):
         return "США"
     return "Европа"
 
-# --- Главное меню (только кнопки) ---
+# --- Главное меню ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
@@ -103,71 +103,59 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление (пошаговое, только кнопки) ---
+# --- Добавление (ссылка → [название, цена]) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     folder = query.data.split("_")[1]
     context.user_data["add_folder"] = folder
-    context.user_data["add_step"] = "url"
+    context.user_data["awaiting_url"] = True
     await query.edit_message_text("🔗 Отправь ссылку на James Edition:")
 
-async def handle_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("add_step")
-    if step != "url":
+async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_url"):
         return
-
     url = update.message.text.strip()
-    folder = context.user_data["add_folder"]
+    folder = context.user_data.pop("add_folder")
+    context.user_data.pop("awaiting_url")
+
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
     c.execute("""
         INSERT INTO properties (url, title, folder, date_added)
         VALUES (?, ?, ?, ?)
-    """, (url, "Без названия", folder, datetime.now().isoformat()))
+    """, (url, "Временное название", folder, datetime.now().isoformat()))
     conn.commit()
     prop_id = c.lastrowid
     conn.close()
 
     context.user_data["add_id"] = prop_id
-    context.user_data["add_step"] = "title"
-    await update.message.reply_text(f"✅ Добавлено (ID {prop_id})\n📝 Теперь отправь **название**:")
+    context.user_data["awaiting_title_price"] = True
+    await update.message.reply_text(f"✅ Объект создан (ID {prop_id})\n📝 Теперь отправь **название и цену** в одном сообщении через запятую.\nПример: *Дом у озера, 1 500 000 USD*", parse_mode="Markdown")
 
-async def handle_title_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("add_step")
-    if step != "title":
-        return
-    prop_id = context.user_data["add_id"]
-    title = update.message.text.strip()
-
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    c.execute("UPDATE properties SET title = ? WHERE id = ?", (title, prop_id))
-    conn.commit()
-    conn.close()
-
-    context.user_data["add_step"] = "price"
-    await update.message.reply_text(f"✅ Название сохранено!\n💰 Теперь отправь **цену**:")
-
-async def handle_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    step = context.user_data.get("add_step")
-    if step != "price":
+async def save_title_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_title_price"):
         return
     prop_id = context.user_data.pop("add_id")
-    price = update.message.text.strip()
+    context.user_data.pop("awaiting_title_price")
+
+    text = update.message.text.strip()
+    parts = text.split(",", 1)
+    if len(parts) != 2:
+        await update.message.reply_text("❌ Нужно: *Название, Цена*\nПример: *Дом у озера, 1 500 000 USD*", parse_mode="Markdown")
+        return
+
+    title = parts[0].strip()
+    price = parts[1].strip()
 
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
-    c.execute("UPDATE properties SET price = ? WHERE id = ?", (price, prop_id))
+    c.execute("UPDATE properties SET title = ?, price = ? WHERE id = ?", (title, price, prop_id))
     conn.commit()
     conn.close()
 
-    context.user_data.pop("add_folder", None)
-    context.user_data.pop("add_step", None)
+    await update.message.reply_text("✅ Название и цена сохранены!")
 
-    await update.message.reply_text("✅ Объект полностью добавлен!")
-
-    # Показать главное меню
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
         [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
@@ -269,9 +257,8 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_input))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_input))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_price_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_title_price))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
     print("Бот запущен...")
