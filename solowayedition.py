@@ -45,59 +45,86 @@ def get_exchange_rate():
     except:
         return 12.0  # fallback курс, если API недоступен
 
+import json
+import re
+
 def fetch_property_data(url):
-    """Парсит страницу James Edition, возвращает словарь с данными"""
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://www.jamesedition.com/"
         }
         response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Название
-        title_tag = soup.find("h1", class_="text-[36px]")
-        title = title_tag.text.strip() if title_tag else "Без названия"
+        # 1. Название — берём из <title> или og:title
+        title = soup.find("meta", property="og:title")
+        title = title["content"].strip() if title else None
+        if not title:
+            title_tag = soup.find("title")
+            title = title_tag.text.strip() if title_tag else "Без названия"
 
-        # Цена (HKD)
+        # 2. Цена — сначала из JSON-LD, потом из og:price:amount
         price_hkd = None
-        meta_price = soup.find("meta", property="og:price:amount")
-        if meta_price and meta_price.get("content"):
-            price_hkd = float(meta_price["content"])
-        else:
-            price_text = soup.find("div", class_="property-price")
+        # JSON-LD
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                if data.get("@type") == "Product" and data.get("offers"):
+                    price_hkd = float(data["offers"]["price"])
+                    break
+            except:
+                pass
+        if not price_hkd:
+            meta_price = soup.find("meta", property="og:price:amount")
+            if meta_price and meta_price.get("content"):
+                price_hkd = float(meta_price["content"])
+        if not price_hkd:
+            price_text = soup.find("div", class_="price")
             if price_text:
                 match = re.search(r"[\d,]+\.?\d*", price_text.text)
                 if match:
                     price_hkd = float(match.group().replace(",", ""))
 
-        # Конвертация в RUB
+        # 3. Конвертация в рубли
         rate = get_exchange_rate()
         price_rub = round(price_hkd * rate, 2) if price_hkd else None
 
-        # Город и страна (из URL)
+        # 4. Город и страна — из URL (надёжнее)
         country_match = re.search(r"/real_estate/[^/]+-([a-z-]+(?:-usa)?)/", url)
         country = country_match.group(1).replace("-", " ").title() if country_match else "Неизвестно"
-        # Город берём из URL до страны
+        # Убираем лишнее "New Zealand" -> "New Zealand"
+        if "new zealand" in country.lower():
+            country = "New Zealand"
+        if "usa" in country.lower():
+            country = "USA"
+
         city_match = re.search(r"/real_estate/([^/]+)-[a-z-]+(?:-usa)?/", url)
         city = city_match.group(1).replace("-", " ").title() if city_match else "Неизвестно"
 
-        # Площадь участка и дома (ищем по ключевым словам)
+        # 5. Площадь — ищем по ключевым словам в тексте
         land_area = ""
         house_area = ""
-        area_text = soup.find("div", string=re.compile(r"Lot|Land|Acres|Sqft", re.I))
-        if area_text:
-            land_area = area_text.find_parent().text.strip()
-        area_text = soup.find("div", string=re.compile(r"Living|Floor|Home", re.I))
-        if area_text:
-            house_area = area_text.find_parent().text.strip()
+        for elem in soup.find_all(["div", "span", "li"]):
+            text = elem.get_text(strip=True)
+            if "acre" in text.lower() and "land" in text.lower():
+                land_area = text
+            if "sqft" in text.lower() and ("living" in text.lower() or "floor" in text.lower() or "home" in text.lower()):
+                house_area = text
 
-        # Агентство
+        # 6. Агентство
         agency = ""
         agent_elem = soup.find("div", class_="agent-name")
         if agent_elem:
             agency = agent_elem.text.strip()
+        if not agency:
+            agent_elem = soup.find("a", class_="agent")
+            if agent_elem:
+                agency = agent_elem.text.strip()
 
-        # Фото
+        # 7. Фото
         photo_url = ""
         meta_img = soup.find("meta", property="og:image")
         if meta_img and meta_img.get("content"):
