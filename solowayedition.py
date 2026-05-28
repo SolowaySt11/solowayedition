@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 import re
-import os
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
@@ -34,22 +33,22 @@ def init_db():
 
 init_db()
 
-# --- Определение страны по URL (без парсинга страницы) ---
+# --- Определение страны по URL (без парсинга) ---
 def get_folder_from_url(url):
     u = url.lower()
     if "new-zealand" in u:
         return "Новая Зеландия"
-    if "/usa/" in u or "united-states" in u:
+    if "usa" in u or "united-states" in u:
         return "США"
-    if "/italy/" in u:
+    if "italy" in u:
         return "Италия"
-    if "/spain/" in u:
+    if "spain" in u:
         return "Испания"
-    if "/france/" in u:
+    if "france" in u:
         return "Франция"
     return "Другая страна"
 
-# --- Попытка достать главное фото (og:image) без полноценного парсинга ---
+# --- Попытка достать главное фото (og:image) ---
 def try_get_photo(url):
     try:
         headers = {
@@ -66,7 +65,7 @@ def try_get_photo(url):
         pass
     return None
 
-# --- Добавление объекта (только ссылка, без цены) ---
+# --- Добавление объекта ---
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Используй: /add https://www.jamesedition.com/...")
@@ -89,20 +88,17 @@ async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-    # Пробуем получить фото
     photo_url = try_get_photo(url)
     if photo_url:
         try:
             photo_response = requests.get(photo_url, timeout=10)
             await update.message.reply_photo(photo=photo_response.content, caption=f"✅ Добавлено в папку «{folder}» (ID {property_id})")
         except:
-            await update.message.reply_text(f"✅ Добавлено в папку «{folder}» (ID {property_id})\n(фото не загрузилось)")
+            await update.message.reply_text(f"✅ Добавлено в папку «{folder}» (ID {property_id})")
     else:
         await update.message.reply_text(f"✅ Добавлено в папку «{folder}» (ID {property_id})")
 
-    await update.message.reply_text("✏️ Теперь можешь добавить цену, фото, описание командой /edit <id>")
-
-# --- Ручное редактирование ---
+# --- Редактирование ---
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("❌ Используй: /edit <id> цена|фото|название <значение>")
@@ -127,8 +123,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text(f"✅ Поле «{field}» для ID {property_id} обновлено.")
 
-# --- Пагинация и список по папке ---
-async def list_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, page=0):
+# --- Пагинация внутри папки ---
+async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, page=0):
     limit = 10
     offset = page * limit
     conn = sqlite3.connect("edition.db")
@@ -143,62 +139,56 @@ async def list_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder
         await update.message.reply_text(f"📭 В папке «{folder}» пока нет объектов.")
         return
 
-    msg = f"📂 *Папка: {folder}* (страница {page+1})\n\n"
+    msg = f"📂 *Папка: {folder}* (стр. {page+1})\n\n"
     for row in rows:
         msg += f"*ID {row[0]}* — {row[1]}\n"
         if row[2]:
             msg += f"💰 Цена: {row[2]}\n"
-        else:
-            msg += "💰 Цена не указана\n"
         msg += "\n"
 
     keyboard = []
     if page > 0:
-        keyboard.append(InlineKeyboardButton("◀️ Назад", callback_data=f"{folder}_page_{page-1}"))
+        keyboard.append(InlineKeyboardButton("◀️ Назад", callback_data=f"page_{folder}_{page-1}"))
     if (page+1)*limit < total:
-        keyboard.append(InlineKeyboardButton("Вперёд ▶️", callback_data=f"{folder}_page_{page+1}"))
+        keyboard.append(InlineKeyboardButton("Вперёд ▶️", callback_data=f"page_{folder}_{page+1}"))
     if keyboard:
         reply_markup = InlineKeyboardMarkup([keyboard])
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+# --- Обработка кнопок пагинации ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    if data.startswith("Новая Зеландия_page_"):
-        page = int(data.split("_")[-1])
-        await list_folder(update, context, "Новая Зеландия", page)
-    elif data.startswith("США_page_"):
-        page = int(data.split("_")[-1])
-        await list_folder(update, context, "США", page)
-    elif data.startswith("Европа_page_"):
-        page = int(data.split("_")[-1])
-        await list_folder(update, context, "Европа", page)
+    if data.startswith("folder_"):
+        folder = data[7:]
+        await show_folder(update, context, folder, 0)
+    elif data.startswith("page_"):
+        parts = data.split("_")
+        folder = parts[1]
+        page = int(parts[2])
+        await show_folder(update, context, folder, page)
     else:
         await start(update, context)
 
-# --- Главное меню с кнопками папок ---
+# --- Главное меню (только кнопки) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="Новая Зеландия_page_0")],
-        [InlineKeyboardButton("🇺🇸 США", callback_data="США_page_0")],
-        [InlineKeyboardButton("🇪🇺 Европа", callback_data="Европа_page_0")]
+        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
+        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
+        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         "🏡 *James Edition Трекер*\n\n"
-        "Команды:\n"
-        "/add <url> — добавить объект (папка определится автоматически)\n"
-        "/edit <id> цена|фото|название <значение> — редактировать\n"
-        "/move <id> <папка> — переместить в другую папку\n"
-        "/list <папка> — показать объекты в папке\n\n"
         "👇 *Выбери папку:*",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
+# --- Перемещение в другую папку ---
 async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("❌ Используй: /move <id> <Новая Зеландия | США | Европа>")
@@ -225,7 +215,7 @@ def main():
     app.add_handler(CommandHandler("edit", edit))
     app.add_handler(CommandHandler("move", move))
     app.add_handler(CallbackQueryHandler(button_callback))
-    print("James Edition бот (финальная стабильная версия) запущен...")
+    print("James Edition бот (финальная версия) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
