@@ -5,7 +5,6 @@ from datetime import datetime
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
-# --- База данных ---
 def init_db():
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
@@ -32,7 +31,6 @@ def get_folder_from_url(url):
         return "США"
     return "Европа"
 
-# --- Главное меню ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
@@ -41,12 +39,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🏡 *James Edition Трекер*\n\n👇 *Выбери папку:*",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        "🏡 James Edition Трекер\n\n👇 Выбери папку:",
+        reply_markup=reply_markup
     )
 
-# --- Показать карточку ---
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, index=0):
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
@@ -58,8 +54,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
         keyboard = [[InlineKeyboardButton("➕ Добавить", callback_data=f"add_{folder}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.callback_query.edit_message_text(
-            f"📂 *{folder}*\n\nПока ничего нет.",
-            parse_mode="Markdown",
+            f"📂 {folder}\n\nПока ничего нет.",
             reply_markup=reply_markup
         )
         return
@@ -72,7 +67,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     prop_id, url, title, price = rows[index]
     context.user_data[f"card_{folder}"] = index
 
-    caption = f"*ID {prop_id}* — {title}\n"
+    caption = f"ID {prop_id} — {title}\n"
     if price:
         caption += f"💰 Цена: {price}\n"
 
@@ -90,9 +85,8 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
         [InlineKeyboardButton("🗑 Переместить", callback_data=f"move_{prop_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(caption, parse_mode="Markdown", reply_markup=reply_markup)
+    await update.callback_query.edit_message_text(caption, reply_markup=reply_markup)
 
-# --- Навигация ---
 async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -103,7 +97,6 @@ async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_index = current + 1 if direction == "next" else current - 1
     await show_card(update, context, folder, new_index)
 
-# --- Добавление (только ссылка, затем редактирование) ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -121,20 +114,16 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO properties (url, title, folder, date_added)
-        VALUES (?, ?, ?, ?)
-    """, (url, "Без названия", folder, datetime.now().isoformat()))
+    c.execute("INSERT INTO properties (url, title, folder, date_added) VALUES (?, ?, ?, ?)",
+              (url, "Без названия", folder, datetime.now().isoformat()))
     conn.commit()
     prop_id = c.lastrowid
     conn.close()
 
-    await update.message.reply_text(f"✅ Добавлен ID {prop_id}. Теперь нажми «✏️ Название» и «✏️ Цена» в карточке, чтобы заполнить данные.")
-
-    # Показать карточку только что созданного объекта
+    await update.message.reply_text(f"✅ Добавлен ID {prop_id}. Теперь нажми «✏️ Название» и «✏️ Цена» в карточке.")
+    # Показать карточку сразу
     await show_card(update, context, folder, 0)
 
-# --- Редактирование названия ---
 async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -147,16 +136,18 @@ async def save_edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prop_id = context.user_data.pop("edit_title_id")
     new_title = update.message.text.strip()
+
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
     c.execute("UPDATE properties SET title = ? WHERE id = ?", (new_title, prop_id))
+    c.execute("SELECT folder FROM properties WHERE id = ?", (prop_id,))
+    folder = c.fetchone()[0]
     conn.commit()
     conn.close()
-    await update.message.reply_text("✅ Название изменено.")
-    # Показываем обновлённую карточку
+
+    await update.message.reply_text(f"✅ Название изменено на «{new_title}».")
     await start(update, context)
 
-# --- Редактирование цены ---
 async def edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -169,16 +160,18 @@ async def save_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prop_id = context.user_data.pop("edit_price_id")
     new_price = update.message.text.strip()
+
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
     c.execute("UPDATE properties SET price = ? WHERE id = ?", (new_price, prop_id))
+    c.execute("SELECT folder FROM properties WHERE id = ?", (prop_id,))
+    folder = c.fetchone()[0]
     conn.commit()
     conn.close()
-    await update.message.reply_text("✅ Цена изменена.")
-    # Показываем обновлённую карточку
+
+    await update.message.reply_text(f"✅ Цена изменена на {new_price}.")
     await start(update, context)
 
-# --- Перемещение ---
 async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -207,7 +200,6 @@ async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"✅ Объект перемещён в папку «{new_folder}».")
     await start(update, context)
 
-# --- Главный callback ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -236,7 +228,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_title))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_price))
-    print("James Edition бут (редактирование через кнопки) запущен...")
+    print("Бот запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
