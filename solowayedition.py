@@ -1,7 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-import requests
-from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 import re
@@ -18,12 +16,6 @@ def init_db():
             url TEXT UNIQUE,
             title TEXT,
             price TEXT,
-            city TEXT,
-            country TEXT,
-            land_area TEXT,
-            house_area TEXT,
-            agency TEXT,
-            photo_url TEXT,
             folder TEXT,
             date_added TEXT
         )
@@ -33,99 +25,34 @@ def init_db():
 
 init_db()
 
-# --- Определение страны по URL (без парсинга) ---
+# --- Определение папки по URL ---
 def get_folder_from_url(url):
     u = url.lower()
     if "new-zealand" in u:
         return "Новая Зеландия"
-    if "usa" in u or "united-states" in u:
+    if "usa" in u:
         return "США"
-    if "italy" in u:
-        return "Италия"
-    if "spain" in u:
-        return "Испания"
-    if "france" in u:
-        return "Франция"
+    if "italy" in u or "spain" in u or "france" in u:
+        return "Европа"
     return "Другая страна"
 
-# --- Попытка достать главное фото (og:image) ---
-def try_get_photo(url):
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            meta = soup.find("meta", property="og:image")
-            if meta and meta.get("content"):
-                return meta["content"]
-    except:
-        pass
-    return None
+# --- Главное меню ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
+        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
+        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "🏡 *James Edition Трекер*\n\n👇 *Выбери папку:*",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
-# --- Добавление объекта ---
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Используй: /add https://www.jamesedition.com/...")
-        return
-    url = context.args[0]
-    folder = get_folder_from_url(url)
-
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    try:
-        c.execute("""
-            INSERT INTO properties (url, title, folder, date_added)
-            VALUES (?, ?, ?, ?)
-        """, (url, "Без названия", folder, datetime.now().isoformat()))
-        conn.commit()
-        property_id = c.lastrowid
-    except sqlite3.IntegrityError:
-        await update.message.reply_text("⚠️ Этот объект уже есть в базе.")
-        return
-    finally:
-        conn.close()
-
-    photo_url = try_get_photo(url)
-    if photo_url:
-        try:
-            photo_response = requests.get(photo_url, timeout=10)
-            await update.message.reply_photo(photo=photo_response.content, caption=f"✅ Добавлено в папку «{folder}» (ID {property_id})")
-        except:
-            await update.message.reply_text(f"✅ Добавлено в папку «{folder}» (ID {property_id})")
-    else:
-        await update.message.reply_text(f"✅ Добавлено в папку «{folder}» (ID {property_id})")
-
-# --- Редактирование ---
-async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("❌ Используй: /edit <id> цена|фото|название <значение>")
-        return
-    property_id = int(context.args[0])
-    field = context.args[1].lower()
-    value = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-
-    conn = sqlite3.connect("edition.db")
-    c = conn.cursor()
-    if field == "цена":
-        c.execute("UPDATE properties SET price = ? WHERE id = ?", (value, property_id))
-    elif field == "фото":
-        c.execute("UPDATE properties SET photo_url = ? WHERE id = ?", (value, property_id))
-    elif field == "название":
-        c.execute("UPDATE properties SET title = ? WHERE id = ?", (value, property_id))
-    else:
-        await update.message.reply_text("❌ Можно редактировать: цена, фото, название")
-        conn.close()
-        return
-    conn.commit()
-    conn.close()
-    await update.message.reply_text(f"✅ Поле «{field}» для ID {property_id} обновлено.")
-
-# --- Пагинация внутри папки ---
+# --- Показать объекты в папке + кнопка "Добавить" ---
 async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, page=0):
-    limit = 10
+    limit = 5
     offset = page * limit
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
@@ -135,11 +62,7 @@ async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder
     total = c.fetchone()[0]
     conn.close()
 
-    if not rows:
-        await update.message.reply_text(f"📭 В папке «{folder}» пока нет объектов.")
-        return
-
-    msg = f"📂 *Папка: {folder}* (стр. {page+1})\n\n"
+    msg = f"📂 *{folder}* (стр. {page+1})\n\n" if rows else f"📂 *{folder}*\n\n"
     for row in rows:
         msg += f"*ID {row[0]}* — {row[1]}\n"
         if row[2]:
@@ -151,17 +74,107 @@ async def show_folder(update: Update, context: ContextTypes.DEFAULT_TYPE, folder
         keyboard.append(InlineKeyboardButton("◀️ Назад", callback_data=f"page_{folder}_{page-1}"))
     if (page+1)*limit < total:
         keyboard.append(InlineKeyboardButton("Вперёд ▶️", callback_data=f"page_{folder}_{page+1}"))
-    if keyboard:
-        reply_markup = InlineKeyboardMarkup([keyboard])
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(msg, parse_mode="Markdown")
+    keyboard.append([InlineKeyboardButton("➕ Добавить объект", callback_data=f"add_{folder}")])
 
-# --- Обработка кнопок пагинации ---
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+# --- Начало добавления (просим ссылку) ---
+async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    folder = query.data.split("_")[1]
+    context.user_data["add_folder"] = folder
+    await query.edit_message_text("🔗 Отправь ссылку на объект James Edition:")
+
+# --- Получение ссылки и сохранение ---
+async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "add_folder" not in context.user_data:
+        return
+    url = update.message.text.strip()
+    folder = context.user_data.pop("add_folder")
+    property_id = None
+
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO properties (url, title, folder, date_added)
+            VALUES (?, ?, ?, ?)
+        """, (url, "Без названия", folder, datetime.now().isoformat()))
+        conn.commit()
+        property_id = c.lastrowid
+    except sqlite3.IntegrityError:
+        await update.message.reply_text("⚠️ Этот объект уже есть.")
+        return
+    finally:
+        conn.close()
+
+    keyboard = [[InlineKeyboardButton("✏️ Указать цену", callback_data=f"price_{property_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"✅ Добавлено в папку «{folder}» (ID {property_id})\n\nТеперь можешь добавить цену:",
+        reply_markup=reply_markup
+    )
+
+# --- Запрос цены ---
+async def ask_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    property_id = int(query.data.split("_")[1])
+    context.user_data["edit_price_id"] = property_id
+    await query.edit_message_text("💰 Введи цену (например: 1 500 000 USD):")
+
+# --- Сохранение цены ---
+async def save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "edit_price_id" not in context.user_data:
+        return
+    property_id = context.user_data.pop("edit_price_id")
+    price = update.message.text.strip()
+
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET price = ? WHERE id = ?", (price, property_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Цена для ID {property_id} сохранена.")
+
+# --- Запрос перемещения ---
+async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    property_id = int(query.data.split("_")[1])
+    context.user_data["move_id"] = property_id
+    keyboard = [
+        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="move_to_Новая Зеландия")],
+        [InlineKeyboardButton("🇺🇸 США", callback_data="move_to_США")],
+        [InlineKeyboardButton("🇪🇺 Европа", callback_data="move_to_Европа")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("🗂 Выбери новую папку:", reply_markup=reply_markup)
+
+# --- Перемещение ---
+async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if "move_id" not in context.user_data:
+        return
+    property_id = context.user_data.pop("move_id")
+    new_folder = query.data.split("_")[2]
+    conn = sqlite3.connect("edition.db")
+    c = conn.cursor()
+    c.execute("UPDATE properties SET folder = ? WHERE id = ?", (new_folder, property_id))
+    conn.commit()
+    conn.close()
+    await query.edit_message_text(f"✅ Объект ID {property_id} перемещён в папку «{new_folder}».")
+
+# --- Главный callback ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
     if data.startswith("folder_"):
         folder = data[7:]
         await show_folder(update, context, folder, 0)
@@ -170,52 +183,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         folder = parts[1]
         page = int(parts[2])
         await show_folder(update, context, folder, page)
-    else:
-        await start(update, context)
-
-# --- Главное меню (только кнопки) ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
-        [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
-        [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "🏡 *James Edition Трекер*\n\n"
-        "👇 *Выбери папку:*",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-
-# --- Перемещение в другую папку ---
-async def move(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("❌ Используй: /move <id> <Новая Зеландия | США | Европа>")
-        return
-    try:
-        property_id = int(context.args[0])
-        folder = " ".join(context.args[1:])
-        if folder not in ["Новая Зеландия", "США", "Европа"]:
-            await update.message.reply_text("❌ Папка должна быть: Новая Зеландия, США или Европа")
-            return
-        conn = sqlite3.connect("edition.db")
-        c = conn.cursor()
-        c.execute("UPDATE properties SET folder = ? WHERE id = ?", (folder, property_id))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ Объект ID {property_id} перемещён в папку «{folder}».")
-    except ValueError:
-        await update.message.reply_text("❌ ID должен быть числом.")
+    elif data.startswith("add_"):
+        await start_add(update, context)
+    elif data.startswith("price_"):
+        await ask_price(update, context)
+    elif data.startswith("move_"):
+        await ask_move(update, context)
+    elif data.startswith("move_to_"):
+        await move_to(update, context)
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("edit", edit))
-    app.add_handler(CommandHandler("move", move))
     app.add_handler(CallbackQueryHandler(button_callback))
-    print("James Edition бот (финальная версия) запущен...")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, save_price))
+    print("James Edition бот (полностью кнопочный) запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
