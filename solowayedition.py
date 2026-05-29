@@ -59,48 +59,89 @@ def try_parse_james_edition(url):
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
+            text = soup.get_text()
+            
+            # Пытаемся найти название из meta-тегов
+            title = None
+            
+            # Способ 1: og:title
+            og_title = soup.find('meta', property='og:title')
+            if og_title and og_title.get('content'):
+                title = og_title['content'].strip()
+            
+            # Способ 2: Обычный title
+            if not title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    title_text = title_tag.get_text()
+                    title_text = re.sub(r'\s*[-|]\s*James\s*Edition.*', '', title_text, flags=re.IGNORECASE)
+                    title_text = title_text.replace('Google Search', '').strip()
+                    if title_text:
+                        title = title_text
+            
+            # Способ 3: Из URL (последняя часть)
+            if not title or title == '':
+                parts = url.rstrip('/').split('/')
+                if len(parts) > 1:
+                    title = parts[-1].replace('-', ' ').title()
+                else:
+                    title = url
             
             # Ищем цену
             price = None
+            
+            # Цена в разных форматах
             price_patterns = [
-                r'\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
-                r'€\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
-                r'£\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
-                r'\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:USD|EUR|GBP)',
+                r'(?:Price|price|PRICE)\s*:?\s*(\$[\d,]+(?:\.\d{2})?)',
+                r'(?:Price|price|PRICE)\s*:?\s*(€[\d,]+(?:\.\d{2})?)',
+                r'(?:Price|price|PRICE)\s*:?\s*(£[\d,]+(?:\.\d{2})?)',
+                r'(\$[\d,]+(?:\.\d{2})?)',
+                r'(€[\d,]+(?:\.\d{2})?)',
+                r'(£[\d,]+(?:\.\d{2})?)',
+                r'(?:USD|EUR|GBP)\s*([\d,]+(?:\.\d{2})?)',
+                r'([\d,]+(?:\.\d{2})?)\s*(?:USD|EUR|GBP)',
             ]
-            text = soup.get_text()
+            
             for pattern in price_patterns:
                 match = re.search(pattern, text)
                 if match:
-                    price = match.group()
+                    price = match.group(1) if len(match.groups()) > 0 else match.group()
+                    # Добавляем валюту если её нет
+                    if not price.startswith(('$', '€', '£')):
+                        if 'USD' in match.group() or '$' in text:
+                            price = '$' + price
+                        elif 'EUR' in match.group() or '€' in text:
+                            price = '€' + price
+                        elif 'GBP' in match.group() or '£' in text:
+                            price = '£' + price
                     break
             
-            # Ищем заголовок
-            title = None
-            title_tag = soup.find('title')
-            if title_tag:
-                title_text = title_tag.get_text()
-                # Убираем "JamesEdition" из заголовка
-                title_text = re.sub(r'\s*[-|]\s*James\s*Edition.*', '', title_text, flags=re.IGNORECASE)
-                title = title_text.strip()
+            # Ищем характеристики
+            details = []
             
-            # Ищем детали
-            details = {}
-            detail_patterns = {
-                'area': r'(\d{2,4})\s*m²',
-                'bedrooms': r'(\d+)\s*bedrooms?',
-                'bathrooms': r'(\d+)\s*bathrooms?',
-            }
-            for key, pattern in detail_patterns.items():
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    details[key] = match.group(1)
+            # Площадь
+            area_match = re.search(r'(\d{2,4})\s*(?:m²|sq\.?\s*ft|sqm)', text, re.IGNORECASE)
+            if area_match:
+                details.append(f"📐 {area_match.group(1)} m²")
             
-            if title or price:
+            # Спальни
+            beds_match = re.search(r'(\d+)\s*(?:bedroom|beds?)', text, re.IGNORECASE)
+            if beds_match:
+                details.append(f"🛏 {beds_match.group(1)} спальни")
+            
+            # Ванные
+            baths_match = re.search(r'(\d+)\s*(?:bathroom|baths?)', text, re.IGNORECASE)
+            if baths_match:
+                details.append(f"🚿 {baths_match.group(1)} ванные")
+            
+            details_str = ' | '.join(details) if details else ''
+            
+            # Возвращаем результат только если нашли хоть что-то полезное
+            if title != url or price or details_str:
                 return {
                     'title': title or url,
                     'price': price or '',
-                    'details': ', '.join([f"{k}: {v}" for k, v in details.items()]) if details else ''
+                    'details': details_str
                 }
         
     except Exception as e:
@@ -217,6 +258,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if context.user_data.get("awaiting_url1"):
         await handle_url1(update, context)
+    elif context.user_data.get("awaiting_manual_title"):
+        await handle_manual_title(update, context)
     elif context.user_data.get("awaiting_url2"):
         await handle_url2(update, context)
     elif context.user_data.get("awaiting_edit"):
