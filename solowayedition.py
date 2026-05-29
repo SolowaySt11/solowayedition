@@ -66,9 +66,10 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     prop_id, url, title, price = rows[index]
     context.user_data[f"card_{folder}"] = index
 
-    caption = f"🏠 {title}\n"
+    # Используем HTML форматирование вместо Markdown для надёжности
+    caption = f"🏠 <a href='{url}'>{title}</a>\n"
     if price:
-        caption += f"🔗 [Превью]({price})\n"
+        caption += f"🔗 <a href='{price}'>Превью</a>\n"
 
     keyboard = [
         [InlineKeyboardButton("🔗 Открыть ссылку", url=url)],
@@ -84,7 +85,8 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
         [InlineKeyboardButton("🗑 Переместить", callback_data=f"move_{prop_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
+    # Меняем parse_mode на HTML
+    await update.callback_query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="HTML")
 
 async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
