@@ -3,10 +3,18 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import sqlite3
 from datetime import datetime
 import os
+import requests
+import re
+import json
+from bs4 import BeautifulSoup
+import html
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
+# Путь для постоянного хранения
 DB_PATH = "/data/edition.db"
+
+# Создаём папку /data если её нет
 os.makedirs("/data", exist_ok=True)
 
 def init_db():
@@ -23,6 +31,7 @@ def init_db():
             details TEXT
         )
     """)
+    # Добавляем колонку details если её нет (для старых баз)
     try:
         c.execute("ALTER TABLE properties ADD COLUMN details TEXT")
     except:
@@ -36,11 +45,181 @@ ALLOWED_USERS = {
     "Соловей": "2011",
 }
 
+def try_parse_james_edition(url):
+    """
+    Пытается достать данные из Google Cache + Google Search Snippet
+    Возвращает словарь с данными или None
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # Попытка 1: Google Cache
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+        response = requests.get(cache_url, headers=headers, timeout=15)
+        
+        soup = None
+        text = ""
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            text = soup.get_text()
+        
+        # Попытка 2: Google Search Snippet (ищем цену в результатах поиска)
+        if soup:
+            # Ищем ссылку на исходную страницу в кэше (она содержит сниппет)
+            snippet_text = ""
+            google_snippet = soup.find('div', style=re.compile('border.*padding'))
+            if google_snippet:
+                snippet_text = google_snippet.get_text()
+            
+            # Комбинируем текст из кэша и сниппета
+            text = text + " " + snippet_text
+        
+        # ===== НАЗВАНИЕ =====
+        title = None
+        
+        if soup:
+            # Способ 1: og:title
+            og_title = soup.find('meta', property='og:title')
+            if og_title and og_title.get('content'):
+                title = og_title['content'].strip()
+            
+            # Способ 2: Обычный title
+            if not title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    title_text = title_tag.get_text()
+                    title_text = re.sub(r'\s*[-|]\s*James\s*Edition.*', '', title_text, flags=re.IGNORECASE)
+                    title_text = title_text.replace('Google Search', '').strip()
+                    if title_text:
+                        title = title_text
+        
+        # УБИРАЕМ ID ИЗ НАЗВАНИЯ
+        if title:
+            title = re.sub(r'\s+\d{6,}\s*$', '', title)
+            title = title.strip()
+        
+        # Способ 3: Из URL
+        if not title:
+            parts = url.rstrip('/').split('/')
+            if len(parts) > 1:
+                raw_title = parts[-1].replace('-', ' ').title()
+                raw_title = re.sub(r'\s+\d{6,}\s*$', '', raw_title)
+                title = raw_title.strip()
+            else:
+                title = url
+        
+        # ===== ЦЕНА =====
+        price = None
+        
+        if soup:
+            # Способ 0: Meta-теги цены
+            og_price = soup.find('meta', property='product:price:amount')
+            if og_price and og_price.get('content'):
+                currency = soup.find('meta', property='product:price:currency')
+                curr = currency['content'] if currency and currency.get('content') else '$'
+                price = f"{curr}{og_price['content']}"
+            
+            # Способ 1: JSON-LD структурированные данные
+            if not price:
+                scripts = soup.find_all('script', type='application/ld+json')
+                for script in scripts:
+                    try:
+                        data = json.loads(script.string)
+                        if isinstance(data, dict):
+                            offers = data.get('offers', {})
+                            if isinstance(offers, dict):
+                                price_val = offers.get('price')
+                                currency_val = offers.get('priceCurrency', 'USD')
+                                if price_val:
+                                    symbols = {'USD': '$', 'EUR': '€', 'GBP': '£'}
+                                    curr_symbol = symbols.get(currency_val, '$')
+                                    price = f"{curr_symbol}{price_val:,.0f}"
+                                    break
+                    except:
+                        pass
+        
+        # Способ 2: Расширенные регулярки по всему тексту
+        if not price and text:
+            price_patterns = [
+                # Цена с валютой впереди
+                r'(?:Price|price|PRICE)\s*:?\s*([\$€£]\s*[\d,]+(?:\.\d{2})?)',
+                # Просто цена с валютой
+                r'([\$€£]\s*[\d,]{1,10}(?:\.\d{2})?)',
+                # Цена перед валютой
+                r'([\d,]{1,10}(?:\.\d{2})?)\s*(?:USD|EUR|GBP|dollars?|euros?|pounds?)',
+                # Цена с "request price" или "guide price"
+                r'(?:Guide\s*Price|Asking\s*Price|Offers\s*Over)\s*:?\s*([\$€£]\s*[\d,]+(?:\.\d{2})?)',
+            ]
+            
+            for pattern in price_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    price = match.group(1) if len(match.groups()) > 0 else match.group()
+                    price = price.replace(' ', '')
+                    if not price.startswith(('$', '€', '£')):
+                        if '$' in text[:500]:
+                            price = '$' + price
+                        elif '€' in text[:500]:
+                            price = '€' + price
+                        elif '£' in text[:500]:
+                            price = '£' + price
+                    break
+        
+        # ===== ХАРАКТЕРИСТИКИ =====
+        details = []
+        
+        if text:
+            # Площадь
+            area_patterns = [
+                r'(\d{2,4})\s*m²',
+                r'(\d{2,4})\s*sq\.?\s*ft',
+                r'(\d{2,4})\s*sqm',
+            ]
+            for pattern in area_patterns:
+                area_match = re.search(pattern, text, re.IGNORECASE)
+                if area_match:
+                    details.append(f"📐 {area_match.group(1)} m²")
+                    break
+            
+            # Спальни
+            beds_match = re.search(r'(\d+)\s*(?:bedroom|beds?)', text, re.IGNORECASE)
+            if beds_match:
+                details.append(f"🛏 {beds_match.group(1)} спальни")
+            
+            # Ванные
+            baths_match = re.search(r'(\d+)\s*(?:bathroom|baths?)', text, re.IGNORECASE)
+            if baths_match:
+                details.append(f"🚿 {baths_match.group(1)} ванные")
+        
+        # Локация из URL
+        location_match = re.search(r'jamesedition\.com/real_?estate/([^/]+/[^/]+)/', url)
+        if location_match:
+            loc = location_match.group(1).replace('-', ' ').title()
+            details.append(f"📍 {loc}")
+        
+        details_str = ' | '.join(details) if details else ''
+        
+        if title or price or details_str:
+            return {
+                'title': title or url,
+                'price': price or '',
+                'details': details_str
+            }
+        
+    except Exception as e:
+        print(f"Ошибка парсинга: {e}")
+    
+    return None
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "authenticated" not in context.user_data:
         await update.message.reply_text("🔐 Привет! Введи свой ник:")
         context.user_data["awaiting_username"] = True
         return
+    
     await show_main_menu(update, context)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,9 +231,15 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.message:
-        await update.message.reply_text("🏡 James Edition Трекер\n\n👇 Выбери папку:", reply_markup=reply_markup)
+        await update.message.reply_text(
+            "🏡 James Edition Трекер\n\n👇 Выбери папку:",
+            reply_markup=reply_markup
+        )
     else:
-        await update.callback_query.edit_message_text("🏡 James Edition Трекер\n\n👇 Выбери папку:", reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(
+            "🏡 James Edition Трекер\n\n👇 Выбери папку:",
+            reply_markup=reply_markup
+        )
 
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, index=0):
     conn = sqlite3.connect(DB_PATH)
@@ -66,7 +251,10 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     if not rows:
         keyboard = [[InlineKeyboardButton("➕ Добавить", callback_data=f"add_{folder}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.callback_query.edit_message_text(f"📂 {folder}\n\nПока ничего нет.", reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(
+            f"📂 {folder}\n\nПока ничего нет.",
+            reply_markup=reply_markup
+        )
         return
 
     if index < 0:
@@ -117,9 +305,14 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_url1"] = True
     context.user_data["awaiting_url2"] = False
     context.user_data["awaiting_edit"] = False
-    await query.edit_message_text("🔗 Отправь **первую ссылку** (на дом):", parse_mode="Markdown")
+    await query.edit_message_text(
+        "🔗 Отправь ссылку на объект James Edition\n\n"
+        "🤖 Я попробую автоматически достать цену и описание!",
+        parse_mode="Markdown"
+    )
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Сначала проверяем аутентификацию
     if context.user_data.get("awaiting_username") or context.user_data.get("awaiting_password"):
         await handle_auth(update, context)
         return
@@ -130,6 +323,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if context.user_data.get("awaiting_url1"):
         await handle_url1(update, context)
+    elif context.user_data.get("awaiting_manual_title"):
+        await handle_manual_title(update, context)
     elif context.user_data.get("awaiting_url2"):
         await handle_url2(update, context)
     elif context.user_data.get("awaiting_edit"):
@@ -166,18 +361,66 @@ async def handle_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_url1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url1 = update.message.text.strip()
     folder = context.user_data["add_folder"]
+    
+    # Пытаемся распарсить
+    await update.message.reply_text("🔍 Пытаюсь достать данные из кэша Google...")
+    parsed = try_parse_james_edition(url1)
+    
+    if parsed:
+        # Получилось!
+        title = parsed['title']
+        price = parsed['price']
+        details = parsed['details']
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO properties (url, title, price, folder, date_added, details) VALUES (?, ?, ?, ?, ?, ?)",
+                  (url1, title, price, folder, datetime.now().isoformat(), details))
+        conn.commit()
+        conn.close()
+        
+        msg = f"✅ Автоматически найдено:\n"
+        msg += f"🏠 {title}\n"
+        if price:
+            msg += f"💰 {price}\n"
+        if details:
+            msg += f"📋 {details}\n"
+        msg += "\nОбъект добавлен!"
+        
+        await update.message.reply_text(msg)
+        context.user_data["awaiting_url1"] = False
+        await show_main_menu(update, context)
+    else:
+        # Не получилось — переходим к ручному вводу
+        await update.message.reply_text(
+            "⚠️ Не удалось автоматически достать данные.\n"
+            "Введи **название** объекта вручную:",
+            parse_mode="Markdown"
+        )
+        # Сохраняем URL во временные данные
+        context.user_data["temp_url"] = url1
+        context.user_data["awaiting_url1"] = False
+        context.user_data["awaiting_manual_title"] = True
 
+async def handle_manual_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной ввод названия"""
+    title = update.message.text.strip()
+    folder = context.user_data["add_folder"]
+    url = context.user_data.get("temp_url", title)
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO properties (url, title, folder, date_added) VALUES (?, ?, ?, ?)",
-              (url1, url1, folder, datetime.now().isoformat()))
+              (url, title, folder, datetime.now().isoformat()))
     conn.commit()
     prop_id = c.lastrowid
     conn.close()
-
-    context.user_data["awaiting_url1"] = False
+    
+    context.user_data["awaiting_manual_title"] = False
     context.user_data["awaiting_url2"] = True
     context.user_data["temp_id"] = prop_id
+    context.user_data.pop("temp_url", None)
+    
     await update.message.reply_text("🔗 Теперь отправь **вторую ссылку** (для превью):", parse_mode="Markdown")
 
 async def handle_url2(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,6 +435,7 @@ async def handle_url2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     context.user_data.pop("add_folder", None)
+    
     await update.message.reply_text("✅ Объект добавлен. Используй /start чтобы увидеть карточки.")
     await show_main_menu(update, context)
 
@@ -272,9 +516,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
+    
     print("Бот запущен...")
     app.run_polling()
 
