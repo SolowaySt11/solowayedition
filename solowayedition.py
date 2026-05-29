@@ -2,11 +2,15 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import sqlite3
 from datetime import datetime
+import os
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
-# Единый путь к базе данных
-DB_PATH = "edition.db"
+# Путь для постоянного хранения
+DB_PATH = "/data/edition.db"
+
+# Создаём папку /data если её нет
+os.makedirs("/data", exist_ok=True)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -26,19 +30,16 @@ def init_db():
 
 init_db()
 
-# --- Простая система аккаунтов ---
 ALLOWED_USERS = {
     "Соловей": "2011",
 }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если пользователь ещё не авторизован
     if "authenticated" not in context.user_data:
         await update.message.reply_text("🔐 Привет! Введи свой ник:")
         context.user_data["awaiting_username"] = True
         return
     
-    # Если уже авторизован — показываем главное меню
     await show_main_menu(update, context)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,12 +131,10 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_auth(update, context)
         return
     
-    # Проверяем авторизацию для всех действий
     if "authenticated" not in context.user_data:
         await update.message.reply_text("🔐 Сначала авторизуйся: /start")
         return
     
-    # Проверяем, какое действие ожидается
     if context.user_data.get("awaiting_url1"):
         await handle_url1(update, context)
     elif context.user_data.get("awaiting_url2"):
@@ -219,7 +218,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_edit"] = False
     new_link = update.message.text.strip()
 
-    conn = sqlite3.connect(DB_PATH)  # Исправлено!
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE properties SET price = ? WHERE id = ?", (new_link, prop_id))
     conn.commit()
@@ -259,7 +258,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # Проверяем авторизацию для callback
     if "authenticated" not in context.user_data:
         await query.edit_message_text("🔐 Сначала авторизуйся: /start")
         return
@@ -285,7 +283,6 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    # Единый обработчик для всех текстовых сообщений
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
     
     print("Бот запущен...")
