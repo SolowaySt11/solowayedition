@@ -30,10 +30,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🇪🇺 Европа", callback_data="folder_Европа")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "🏡 James Edition Трекер\n\n👇 Выбери папку:",
-        reply_markup=reply_markup
-    )
+    
+    if update.message:
+        await update.message.reply_text(
+            "🏡 James Edition Трекер\n\n👇 Выбери папку:",
+            reply_markup=reply_markup
+        )
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(
+            "🏡 James Edition Трекер\n\n👇 Выбери папку:",
+            reply_markup=reply_markup
+        )
 
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, index=0):
     conn = sqlite3.connect("edition.db")
@@ -59,7 +66,6 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     prop_id, url, title, price = rows[index]
     context.user_data[f"card_{folder}"] = index
 
-    # title и price — это ссылки (первая и вторая)
     caption = f"🏠 {title}\n"
     if price:
         caption += f"🔗 [Превью]({price})\n"
@@ -68,6 +74,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
         [InlineKeyboardButton("🔗 Открыть ссылку", url=url)],
         [
             InlineKeyboardButton("◀️", callback_data=f"card_{folder}_prev"),
+            InlineKeyboardButton(f"{index + 1}/{len(rows)}", callback_data="noop"),
             InlineKeyboardButton("▶️", callback_data=f"card_{folder}_next")
         ],
         [
@@ -95,11 +102,20 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     folder = query.data.split("_")[1]
     context.user_data["add_folder"] = folder
     context.user_data["awaiting_url1"] = True
+    context.user_data["awaiting_url2"] = False
+    context.user_data["awaiting_edit"] = False
     await query.edit_message_text("🔗 Отправь **первую ссылку** (на дом):", parse_mode="Markdown")
 
+async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, какое действие ожидается
+    if context.user_data.get("awaiting_url1"):
+        await handle_url1(update, context)
+    elif context.user_data.get("awaiting_url2"):
+        await handle_url2(update, context)
+    elif context.user_data.get("awaiting_edit"):
+        await handle_edit(update, context)
+
 async def handle_url1(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_url1"):
-        return
     url1 = update.message.text.strip()
     folder = context.user_data["add_folder"]
 
@@ -117,11 +133,9 @@ async def handle_url1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔗 Теперь отправь **вторую ссылку** (она будет показывать превью в карточке):", parse_mode="Markdown")
 
 async def handle_url2(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_url2"):
-        return
     url2 = update.message.text.strip()
     prop_id = context.user_data.pop("temp_id")
-    context.user_data.pop("awaiting_url2")
+    context.user_data["awaiting_url2"] = False
 
     conn = sqlite3.connect("edition.db")
     c = conn.cursor()
@@ -129,7 +143,10 @@ async def handle_url2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text("✅ Объект добавлен. Выбери папку, чтобы увидеть карточку.")
+    # Очищаем все состояния ожидания
+    context.user_data.pop("add_folder", None)
+    
+    await update.message.reply_text("✅ Объект добавлен. Используй /start чтобы увидеть карточки.")
     await start(update, context)
 
 async def edit_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,13 +155,13 @@ async def edit_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prop_id = int(query.data.split("_")[1])
     context.user_data["edit_id"] = prop_id
     context.user_data["awaiting_edit"] = True
+    context.user_data["awaiting_url1"] = False
+    context.user_data["awaiting_url2"] = False
     await query.edit_message_text("🔗 Отправь **новую ссылку** (она заменит текущую):", parse_mode="Markdown")
 
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_edit"):
-        return
     prop_id = context.user_data.pop("edit_id")
-    context.user_data.pop("awaiting_edit")
+    context.user_data["awaiting_edit"] = False
     new_link = update.message.text.strip()
 
     conn = sqlite3.connect("edition.db")
@@ -153,8 +170,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text("✅ Ссылка обновлена.")
-    await start(update, context)
+    await update.message.reply_text("✅ Ссылка обновлена. Используй /start чтобы увидеть изменения.")
 
 async def ask_move(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -182,14 +198,15 @@ async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     await query.edit_message_text(f"✅ Объект перемещён в папку «{new_folder}».")
-    await start(update, context)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data.startswith("folder_"):
+    if data == "noop":
+        return
+    elif data.startswith("folder_"):
         folder = data.split("_", 1)[1]
         await show_card(update, context, folder, 0)
     elif data.startswith("card_"):
@@ -207,9 +224,8 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url1))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url2))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit))
+    # Единый обработчик для всех текстовых сообщений
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
     print("Бот запущен...")
     app.run_polling()
 
