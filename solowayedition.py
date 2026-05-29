@@ -47,24 +47,40 @@ ALLOWED_USERS = {
 
 def try_parse_james_edition(url):
     """
-    Пытается достать данные из Google Cache
+    Пытается достать данные из Google Cache + Google Search Snippet
     Возвращает словарь с данными или None
     """
     try:
-        # Попытка 1: Google Cache
-        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
+        
+        # Попытка 1: Google Cache
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
         response = requests.get(cache_url, headers=headers, timeout=15)
+        
+        soup = None
+        text = ""
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             text = soup.get_text()
+        
+        # Попытка 2: Google Search Snippet (ищем цену в результатах поиска)
+        if soup:
+            # Ищем ссылку на исходную страницу в кэше (она содержит сниппет)
+            snippet_text = ""
+            google_snippet = soup.find('div', style=re.compile('border.*padding'))
+            if google_snippet:
+                snippet_text = google_snippet.get_text()
             
-            # ===== НАЗВАНИЕ =====
-            title = None
-            
+            # Комбинируем текст из кэша и сниппета
+            text = text + " " + snippet_text
+        
+        # ===== НАЗВАНИЕ =====
+        title = None
+        
+        if soup:
             # Способ 1: og:title
             og_title = soup.find('meta', property='og:title')
             if og_title and og_title.get('content'):
@@ -79,26 +95,26 @@ def try_parse_james_edition(url):
                     title_text = title_text.replace('Google Search', '').strip()
                     if title_text:
                         title = title_text
-            
-            # УБИРАЕМ ID ИЗ НАЗВАНИЯ (если остался)
-            if title:
-                # Убираем числа в конце (6+ цифр)
-                title = re.sub(r'\s+\d{6,}\s*$', '', title)
-                title = title.strip()
-            
-            # Способ 3: Из URL
-            if not title:
-                parts = url.rstrip('/').split('/')
-                if len(parts) > 1:
-                    raw_title = parts[-1].replace('-', ' ').title()
-                    raw_title = re.sub(r'\s+\d{6,}\s*$', '', raw_title)
-                    title = raw_title.strip()
-                else:
-                    title = url
-            
-            # ===== ЦЕНА =====
-            price = None
-            
+        
+        # УБИРАЕМ ID ИЗ НАЗВАНИЯ
+        if title:
+            title = re.sub(r'\s+\d{6,}\s*$', '', title)
+            title = title.strip()
+        
+        # Способ 3: Из URL
+        if not title:
+            parts = url.rstrip('/').split('/')
+            if len(parts) > 1:
+                raw_title = parts[-1].replace('-', ' ').title()
+                raw_title = re.sub(r'\s+\d{6,}\s*$', '', raw_title)
+                title = raw_title.strip()
+            else:
+                title = url
+        
+        # ===== ЦЕНА =====
+        price = None
+        
+        if soup:
             # Способ 0: Meta-теги цены
             og_price = soup.find('meta', property='product:price:amount')
             if og_price and og_price.get('content'):
@@ -113,7 +129,6 @@ def try_parse_james_edition(url):
                     try:
                         data = json.loads(script.string)
                         if isinstance(data, dict):
-                            # Ищем цену в offers
                             offers = data.get('offers', {})
                             if isinstance(offers, dict):
                                 price_val = offers.get('price')
@@ -125,32 +140,38 @@ def try_parse_james_edition(url):
                                     break
                     except:
                         pass
+        
+        # Способ 2: Расширенные регулярки по всему тексту
+        if not price and text:
+            price_patterns = [
+                # Цена с валютой впереди
+                r'(?:Price|price|PRICE)\s*:?\s*([\$€£]\s*[\d,]+(?:\.\d{2})?)',
+                # Просто цена с валютой
+                r'([\$€£]\s*[\d,]{1,10}(?:\.\d{2})?)',
+                # Цена перед валютой
+                r'([\d,]{1,10}(?:\.\d{2})?)\s*(?:USD|EUR|GBP|dollars?|euros?|pounds?)',
+                # Цена с "request price" или "guide price"
+                r'(?:Guide\s*Price|Asking\s*Price|Offers\s*Over)\s*:?\s*([\$€£]\s*[\d,]+(?:\.\d{2})?)',
+            ]
             
-            # Способ 2: Регулярки по тексту
-            if not price:
-                price_patterns = [
-                    r'(?:Price|price|PRICE)\s*:?\s*([\$€£]\s*[\d,]+(?:\.\d{2})?)',
-                    r'([\$€£]\s*[\d,]{1,10}(?:\.\d{2})?)',
-                    r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:USD|EUR|GBP)',
-                ]
-                
-                for pattern in price_patterns:
-                    match = re.search(pattern, text[:2000])  # Ищем только в начале текста
-                    if match:
-                        price = match.group(1) if len(match.groups()) > 0 else match.group()
-                        price = price.replace(' ', '')
-                        if not price.startswith(('$', '€', '£')):
-                            if '$' in text[:500]:
-                                price = '$' + price
-                            elif '€' in text[:500]:
-                                price = '€' + price
-                            elif '£' in text[:500]:
-                                price = '£' + price
-                        break
-            
-            # ===== ХАРАКТЕРИСТИКИ =====
-            details = []
-            
+            for pattern in price_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    price = match.group(1) if len(match.groups()) > 0 else match.group()
+                    price = price.replace(' ', '')
+                    if not price.startswith(('$', '€', '£')):
+                        if '$' in text[:500]:
+                            price = '$' + price
+                        elif '€' in text[:500]:
+                            price = '€' + price
+                        elif '£' in text[:500]:
+                            price = '£' + price
+                    break
+        
+        # ===== ХАРАКТЕРИСТИКИ =====
+        details = []
+        
+        if text:
             # Площадь
             area_patterns = [
                 r'(\d{2,4})\s*m²',
@@ -172,21 +193,21 @@ def try_parse_james_edition(url):
             baths_match = re.search(r'(\d+)\s*(?:bathroom|baths?)', text, re.IGNORECASE)
             if baths_match:
                 details.append(f"🚿 {baths_match.group(1)} ванные")
-            
-            # Локация из URL
-            location_match = re.search(r'jamesedition\.com/real_?estate/([^/]+/[^/]+)/', url)
-            if location_match:
-                loc = location_match.group(1).replace('-', ' ').title()
-                details.append(f"📍 {loc}")
-            
-            details_str = ' | '.join(details) if details else ''
-            
-            if title or price or details_str:
-                return {
-                    'title': title or url,
-                    'price': price or '',
-                    'details': details_str
-                }
+        
+        # Локация из URL
+        location_match = re.search(r'jamesedition\.com/real_?estate/([^/]+/[^/]+)/', url)
+        if location_match:
+            loc = location_match.group(1).replace('-', ' ').title()
+            details.append(f"📍 {loc}")
+        
+        details_str = ' | '.join(details) if details else ''
+        
+        if title or price or details_str:
+            return {
+                'title': title or url,
+                'price': price or '',
+                'details': details_str
+            }
         
     except Exception as e:
         print(f"Ошибка парсинга: {e}")
