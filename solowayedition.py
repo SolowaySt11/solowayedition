@@ -3,6 +3,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import sqlite3
 from datetime import datetime
 import os
+import requests
+import re
+from bs4 import BeautifulSoup
+import html
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
@@ -22,9 +26,15 @@ def init_db():
             title TEXT,
             price TEXT,
             folder TEXT,
-            date_added TEXT
+            date_added TEXT,
+            details TEXT
         )
     """)
+    # Добавляем колонку details если её нет (для старых баз)
+    try:
+        c.execute("ALTER TABLE properties ADD COLUMN details TEXT")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -33,6 +43,70 @@ init_db()
 ALLOWED_USERS = {
     "Соловей": "2011",
 }
+
+def try_parse_james_edition(url):
+    """
+    Пытается достать данные из Google Cache
+    Возвращает словарь с данными или None
+    """
+    try:
+        # Попытка 1: Google Cache
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(cache_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Ищем цену
+            price = None
+            price_patterns = [
+                r'\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
+                r'€\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
+                r'£\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
+                r'\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:USD|EUR|GBP)',
+            ]
+            text = soup.get_text()
+            for pattern in price_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    price = match.group()
+                    break
+            
+            # Ищем заголовок
+            title = None
+            title_tag = soup.find('title')
+            if title_tag:
+                title_text = title_tag.get_text()
+                # Убираем "JamesEdition" из заголовка
+                title_text = re.sub(r'\s*[-|]\s*James\s*Edition.*', '', title_text, flags=re.IGNORECASE)
+                title = title_text.strip()
+            
+            # Ищем детали
+            details = {}
+            detail_patterns = {
+                'area': r'(\d{2,4})\s*m²',
+                'bedrooms': r'(\d+)\s*bedrooms?',
+                'bathrooms': r'(\d+)\s*bathrooms?',
+            }
+            for key, pattern in detail_patterns.items():
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    details[key] = match.group(1)
+            
+            if title or price:
+                return {
+                    'title': title or url,
+                    'price': price or '',
+                    'details': ', '.join([f"{k}: {v}" for k, v in details.items()]) if details else ''
+                }
+        
+    except Exception as e:
+        print(f"Ошибка парсинга: {e}")
+    
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "authenticated" not in context.user_data:
@@ -64,7 +138,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, index=0):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, url, title, price FROM properties WHERE folder = ? ORDER BY id", (folder,))
+    c.execute("SELECT id, url, title, price, details FROM properties WHERE folder = ? ORDER BY id", (folder,))
     rows = c.fetchall()
     conn.close()
 
@@ -82,12 +156,14 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     if index >= len(rows):
         index = len(rows) - 1
 
-    prop_id, url, title, price = rows[index]
+    prop_id, url, title, price, details = rows[index]
     context.user_data[f"card_{folder}"] = index
 
     caption = f"🏠 <a href='{url}'>{title}</a>\n"
     if price:
-        caption += f"🔗 <a href='{price}'>Превью</a>\n"
+        caption += f"💰 {price}\n"
+    if details:
+        caption += f"📋 {details}\n"
 
     keyboard = [
         [InlineKeyboardButton("🔗 Открыть ссылку", url=url)],
@@ -98,7 +174,7 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
         ],
         [
             InlineKeyboardButton("➕ Добавить", callback_data=f"add_{folder}"),
-            InlineKeyboardButton("📝 Изменить ссылку", callback_data=f"edit_{prop_id}")
+            InlineKeyboardButton("📝 Изменить", callback_data=f"edit_{prop_id}")
         ],
         [InlineKeyboardButton("🗑 Переместить", callback_data=f"move_{prop_id}")]
     ]
@@ -123,7 +199,11 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_url1"] = True
     context.user_data["awaiting_url2"] = False
     context.user_data["awaiting_edit"] = False
-    await query.edit_message_text("🔗 Отправь **первую ссылку** (на дом):", parse_mode="Markdown")
+    await query.edit_message_text(
+        "🔗 Отправь ссылку на объект James Edition\n\n"
+        "🤖 Я попробую автоматически достать цену и описание!",
+        parse_mode="Markdown"
+    )
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сначала проверяем аутентификацию
@@ -173,19 +253,67 @@ async def handle_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_url1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url1 = update.message.text.strip()
     folder = context.user_data["add_folder"]
+    
+    # Пытаемся распарсить
+    await update.message.reply_text("🔍 Пытаюсь достать данные из кэша Google...")
+    parsed = try_parse_james_edition(url1)
+    
+    if parsed:
+        # Получилось!
+        title = parsed['title']
+        price = parsed['price']
+        details = parsed['details']
+        
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO properties (url, title, price, folder, date_added, details) VALUES (?, ?, ?, ?, ?, ?)",
+                  (url1, title, price, folder, datetime.now().isoformat(), details))
+        conn.commit()
+        conn.close()
+        
+        msg = f"✅ Автоматически найдено:\n"
+        msg += f"🏠 {title}\n"
+        if price:
+            msg += f"💰 {price}\n"
+        if details:
+            msg += f"📋 {details}\n"
+        msg += "\nОбъект добавлен!"
+        
+        await update.message.reply_text(msg)
+        context.user_data["awaiting_url1"] = False
+        await show_main_menu(update, context)
+    else:
+        # Не получилось — переходим к ручному вводу
+        await update.message.reply_text(
+            "⚠️ Не удалось автоматически достать данные.\n"
+            "Введи **название** объекта вручную:",
+            parse_mode="Markdown"
+        )
+        # Сохраняем URL во временные данные
+        context.user_data["temp_url"] = url1
+        context.user_data["awaiting_url1"] = False
+        context.user_data["awaiting_manual_title"] = True
 
+async def handle_manual_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной ввод названия"""
+    title = update.message.text.strip()
+    folder = context.user_data["add_folder"]
+    url = context.user_data.get("temp_url", title)
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO properties (url, title, folder, date_added) VALUES (?, ?, ?, ?)",
-              (url1, url1, folder, datetime.now().isoformat()))
+              (url, title, folder, datetime.now().isoformat()))
     conn.commit()
     prop_id = c.lastrowid
     conn.close()
-
-    context.user_data["awaiting_url1"] = False
+    
+    context.user_data["awaiting_manual_title"] = False
     context.user_data["awaiting_url2"] = True
     context.user_data["temp_id"] = prop_id
-    await update.message.reply_text("🔗 Теперь отправь **вторую ссылку** (она будет показывать превью в карточке):", parse_mode="Markdown")
+    context.user_data.pop("temp_url", None)
+    
+    await update.message.reply_text("🔗 Теперь отправь **вторую ссылку** (для превью):", parse_mode="Markdown")
 
 async def handle_url2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url2 = update.message.text.strip()
