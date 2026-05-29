@@ -5,8 +5,11 @@ from datetime import datetime
 
 TOKEN = "8874435972:AAENcmVfdVyVaV2Ck4bezo9n82hH2ykJp5E"
 
+# Единый путь к базе данных
+DB_PATH = "edition.db"
+
 def init_db():
-    conn = sqlite3.connect("edition.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS properties (
@@ -23,7 +26,22 @@ def init_db():
 
 init_db()
 
+# --- Простая система аккаунтов ---
+ALLOWED_USERS = {
+    "Соловей": "2011",
+}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Если пользователь ещё не авторизован
+    if "authenticated" not in context.user_data:
+        await update.message.reply_text("🔐 Привет! Введи свой ник:")
+        context.user_data["awaiting_username"] = True
+        return
+    
+    # Если уже авторизован — показываем главное меню
+    await show_main_menu(update, context)
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🇳🇿 Новая Зеландия", callback_data="folder_Новая Зеландия")],
         [InlineKeyboardButton("🇺🇸 США", callback_data="folder_США")],
@@ -36,14 +54,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🏡 James Edition Трекер\n\n👇 Выбери папку:",
             reply_markup=reply_markup
         )
-    elif update.callback_query:
+    else:
         await update.callback_query.edit_message_text(
             "🏡 James Edition Трекер\n\n👇 Выбери папку:",
             reply_markup=reply_markup
         )
 
 async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, index=0):
-    conn = sqlite3.connect("edition.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT id, url, title, price FROM properties WHERE folder = ? ORDER BY id", (folder,))
     rows = c.fetchall()
@@ -66,7 +84,6 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
     prop_id, url, title, price = rows[index]
     context.user_data[f"card_{folder}"] = index
 
-    # Используем HTML форматирование вместо Markdown для надёжности
     caption = f"🏠 <a href='{url}'>{title}</a>\n"
     if price:
         caption += f"🔗 <a href='{price}'>Превью</a>\n"
@@ -85,7 +102,6 @@ async def show_card(update: Update, context: ContextTypes.DEFAULT_TYPE, folder, 
         [InlineKeyboardButton("🗑 Переместить", callback_data=f"move_{prop_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    # Меняем parse_mode на HTML
     await update.callback_query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="HTML")
 
 async def card_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,6 +125,16 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("🔗 Отправь **первую ссылку** (на дом):", parse_mode="Markdown")
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Сначала проверяем аутентификацию
+    if context.user_data.get("awaiting_username") or context.user_data.get("awaiting_password"):
+        await handle_auth(update, context)
+        return
+    
+    # Проверяем авторизацию для всех действий
+    if "authenticated" not in context.user_data:
+        await update.message.reply_text("🔐 Сначала авторизуйся: /start")
+        return
+    
     # Проверяем, какое действие ожидается
     if context.user_data.get("awaiting_url1"):
         await handle_url1(update, context)
@@ -117,11 +143,39 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.user_data.get("awaiting_edit"):
         await handle_edit(update, context)
 
+async def handle_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_username"):
+        username = update.message.text.strip()
+        if username in ALLOWED_USERS:
+            context.user_data["temp_username"] = username
+            context.user_data["awaiting_username"] = False
+            context.user_data["awaiting_password"] = True
+            await update.message.reply_text("🔑 Введи пароль:")
+        else:
+            await update.message.reply_text("❌ Неверный ник. Попробуй ещё раз:")
+        return
+
+    if context.user_data.get("awaiting_password"):
+        password = update.message.text.strip()
+        username = context.user_data.get("temp_username")
+        if ALLOWED_USERS.get(username) == password:
+            context.user_data["authenticated"] = True
+            context.user_data.pop("temp_username", None)
+            context.user_data.pop("awaiting_password", None)
+            await update.message.reply_text("✅ Доступ разрешён!")
+            await show_main_menu(update, context)
+        else:
+            context.user_data.pop("temp_username", None)
+            context.user_data.pop("awaiting_password", None)
+            context.user_data.pop("awaiting_username", None)
+            await update.message.reply_text("❌ Неверный пароль. Начни заново с /start")
+        return
+
 async def handle_url1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url1 = update.message.text.strip()
     folder = context.user_data["add_folder"]
 
-    conn = sqlite3.connect("edition.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO properties (url, title, folder, date_added) VALUES (?, ?, ?, ?)",
               (url1, url1, folder, datetime.now().isoformat()))
@@ -139,17 +193,16 @@ async def handle_url2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prop_id = context.user_data.pop("temp_id")
     context.user_data["awaiting_url2"] = False
 
-    conn = sqlite3.connect("edition.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE properties SET price = ? WHERE id = ?", (url2, prop_id))
     conn.commit()
     conn.close()
 
-    # Очищаем все состояния ожидания
     context.user_data.pop("add_folder", None)
     
     await update.message.reply_text("✅ Объект добавлен. Используй /start чтобы увидеть карточки.")
-    await start(update, context)
+    await show_main_menu(update, context)
 
 async def edit_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -166,7 +219,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting_edit"] = False
     new_link = update.message.text.strip()
 
-    conn = sqlite3.connect("edition.db")
+    conn = sqlite3.connect(DB_PATH)  # Исправлено!
     c = conn.cursor()
     c.execute("UPDATE properties SET price = ? WHERE id = ?", (new_link, prop_id))
     conn.commit()
@@ -194,7 +247,7 @@ async def move_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prop_id = context.user_data.pop("move_id")
     new_folder = query.data.split("_")[2]
-    conn = sqlite3.connect("edition.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE properties SET folder = ? WHERE id = ?", (new_folder, prop_id))
     conn.commit()
@@ -205,6 +258,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    # Проверяем авторизацию для callback
+    if "authenticated" not in context.user_data:
+        await query.edit_message_text("🔐 Сначала авторизуйся: /start")
+        return
 
     if data == "noop":
         return
@@ -224,10 +282,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
     # Единый обработчик для всех текстовых сообщений
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
+    
     print("Бот запущен...")
     app.run_polling()
 
